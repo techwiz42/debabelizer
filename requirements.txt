@@ -1,0 +1,21 @@
+# Debabelizer Core Requirements
+# Minimal packages needed for basic STT/TTS functionality
+
+# HTTP client for TTS providers (ElevenLabs, etc.)
+aiohttp>=3.8.0
+
+# WebSocket client for STT providers (Soniox, etc.)
+websockets>=10.0
+
+# Note: All other dependencies are either:
+# 1. Standard library (asyncio, json, pathlib, etc.)
+# 2. Provider-specific extras (install with pip install .[provider])
+# 3. External tools (FFmpeg for audio conversion)
+#
+# For additional providers, install extras:
+# pip install .[deepgram]     # For Deepgram STT
+# pip install .[azure]        # For Azure Speech Services  
+# pip install .[all]          # For all supported providers
+#
+# For development:
+# pip install .[dev]          # Includes testing and linting tools
