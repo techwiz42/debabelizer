@@ -9,13 +9,22 @@ from datetime import datetime
 
 
 @dataclass
+class WordTiming:
+    """Word-level timing information for transcription"""
+    word: str
+    start_time: float
+    end_time: float
+    confidence: Optional[float] = None
+
+
+@dataclass
 class TranscriptionResult:
     """Result from speech-to-text transcription"""
     text: str
     confidence: float = 0.0
     language_detected: str = "unknown"
     duration: float = 0.0
-    words: List[Dict[str, Any]] = None
+    words: List[WordTiming] = None
     is_final: bool = True
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -45,7 +54,7 @@ class STTProvider(ABC):
     All STT providers must implement these methods to be compatible with Debabelizer.
     """
     
-    def __init__(self, api_key: str, **config):
+    def __init__(self, api_key: Optional[str] = None, **config):
         self.api_key = api_key
         self.config = config
         self.is_connected = False

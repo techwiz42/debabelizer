@@ -48,7 +48,7 @@ def detect_audio_format(file_path: Path) -> str:
         if header.startswith(b'RIFF') and b'WAVE' in header:
             logger.debug("Detected WAV format from header")
             return "wav"
-        elif header.startswith(b'ID3') or header[1:4] == b'ID3':
+        elif header.startswith(b'ID3') or b'ID3' in header or header.startswith(b'\xff\xfb'):
             logger.debug("Detected MP3 format from header")
             return "mp3"
         elif header.startswith(b'fLaC'):
@@ -204,7 +204,7 @@ def validate_audio_file(file_path: Path) -> Dict[str, Any]:
         )
         
         # Basic validation
-        if result["size_bytes"] < 1024:  # Less than 1KB
+        if result["size_bytes"] < 100:  # Less than 100 bytes
             result["errors"].append("File suspiciously small")
         elif result["size_bytes"] > 100 * 1024 * 1024:  # More than 100MB
             result["errors"].append("File suspiciously large")

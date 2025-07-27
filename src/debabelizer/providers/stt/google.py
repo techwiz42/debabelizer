@@ -157,6 +157,11 @@ class GoogleSTTProvider(STTProvider):
         """Google Cloud Speech supports streaming"""
         return True
     
+    @property
+    def supports_language_detection(self) -> bool:
+        """Google Cloud Speech supports automatic language detection"""
+        return True
+    
     async def transcribe_file(
         self,
         file_path: str,

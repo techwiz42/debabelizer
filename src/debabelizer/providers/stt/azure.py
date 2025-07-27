@@ -192,6 +192,11 @@ class AzureSTTProvider(STTProvider):
         """Azure Speech supports streaming"""
         return True
     
+    @property
+    def supports_language_detection(self) -> bool:
+        """Azure Speech supports automatic language detection"""
+        return True
+    
     async def transcribe_file(
         self,
         file_path: str,

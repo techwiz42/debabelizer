@@ -34,6 +34,20 @@ class TestSTTProviderInterface:
         "ko": "korean",     # Korean
         "vi": "vietnamese"  # Vietnamese
     }
+    
+    def _create_mock_provider(self, **overrides):
+        """Create a properly configured mock provider"""
+        mock_provider = AsyncMock()
+        # Make get_cost_estimate a sync method
+        from unittest.mock import Mock
+        mock_provider.get_cost_estimate = Mock(return_value=0.001)
+        mock_provider.name = "mock_provider"
+        
+        # Apply any overrides
+        for key, value in overrides.items():
+            setattr(mock_provider, key, value)
+            
+        return mock_provider
 
     def _get_available_stt_providers(self):
         """Get list of configured STT providers for testing"""
@@ -53,7 +67,7 @@ class TestSTTProviderInterface:
             processor = VoiceProcessor(stt_provider=provider_name, config=config)
             
             # Mock the actual provider to avoid API calls
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.transcribe_file.return_value = TranscriptionResult(
                 text="This is a test transcription",
                 confidence=0.9,
@@ -61,7 +75,8 @@ class TestSTTProviderInterface:
                 language_detected="en"
             )
             
-            with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+            with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                 result = await processor.transcribe_file("test_audio.wav")
                 
                 # Test interface contract
@@ -92,7 +107,7 @@ class TestSTTProviderInterface:
             
             # Test with each of our test languages
             for lang_code, lang_name in self.TEST_LANGUAGES.items():
-                mock_provider = AsyncMock()
+                mock_provider = self._create_mock_provider()
                 mock_provider.transcribe_file.return_value = TranscriptionResult(
                     text=f"Test transcription in {lang_name}",
                     confidence=0.85,
@@ -100,7 +115,8 @@ class TestSTTProviderInterface:
                     language_detected=lang_code
                 )
                 
-                with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+                with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                     result = await processor.transcribe_file(
                         f"{lang_name}_sample.wav", 
                         language=lang_code
@@ -112,7 +128,9 @@ class TestSTTProviderInterface:
                     # Verify provider was called with correct language
                     mock_provider.transcribe_file.assert_called_with(
                         f"{lang_name}_sample.wav",
-                        language=lang_code
+                        lang_code,
+                        None,
+                        audio_format='wav'
                     )
 
     @pytest.mark.asyncio
@@ -129,7 +147,7 @@ class TestSTTProviderInterface:
             
             # Test auto-detection for each language
             for lang_code, lang_name in self.TEST_LANGUAGES.items():
-                mock_provider = AsyncMock()
+                mock_provider = self._create_mock_provider()
                 mock_provider.transcribe_file.return_value = TranscriptionResult(
                     text=f"Auto-detected {lang_name} text",
                     confidence=0.82,
@@ -137,7 +155,8 @@ class TestSTTProviderInterface:
                     language_detected=lang_code  # Provider auto-detected this
                 )
                 
-                with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+                with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                     # Don't specify language - test auto-detection
                     result = await processor.transcribe_file(f"{lang_name}_sample.wav")
                     
@@ -162,7 +181,7 @@ class TestSTTProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(stt_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.start_streaming.return_value = "test_session_123"
             mock_provider.stream_audio.return_value = StreamingResult(
                 session_id="test_session_123",
@@ -170,11 +189,11 @@ class TestSTTProviderInterface:
                 text="Partial transcript",
                 confidence=0.7
             )
-            mock_provider.end_streaming.return_value = True
+            mock_provider.stop_streaming.return_value = True
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
                 # Start streaming
-                session_id = await processor.start_streaming_stt(
+                session_id = await processor.start_streaming_transcription(
                     language="en",
                     sample_rate=16000
                 )
@@ -183,8 +202,27 @@ class TestSTTProviderInterface:
                 assert len(session_id) > 0
                 
                 # Stream audio data
-                result = await processor.stream_audio(session_id, b"audio_chunk")
+                await processor.stream_audio(session_id, b"audio_chunk")
                 
+                # Mock the streaming results generator
+                async def mock_streaming_results(session_id):
+                    yield StreamingResult(
+                        session_id="test_session_123",
+                        is_final=False,
+                        text="Partial transcript",
+                        confidence=0.7
+                    )
+                
+                mock_provider.get_streaming_results = mock_streaming_results
+                
+                # Get streaming results
+                results = []
+                async for result in processor.get_streaming_results(session_id):
+                    results.append(result)
+                    break  # Just get one result for testing
+                    
+                assert len(results) == 1
+                result = results[0]
                 assert isinstance(result, StreamingResult)
                 assert result.session_id == session_id
                 assert hasattr(result, 'is_final')
@@ -192,8 +230,9 @@ class TestSTTProviderInterface:
                 assert hasattr(result, 'confidence')
                 
                 # End streaming
-                ended = await processor.end_streaming_session(session_id)
-                assert ended is True
+                await processor.stop_streaming_transcription(session_id)
+                # Verify stop was called
+                mock_provider.stop_streaming.assert_called_with(session_id)
 
     @pytest.mark.asyncio
     async def test_streaming_stt_with_callbacks(self):
@@ -217,11 +256,11 @@ class TestSTTProviderInterface:
             async def on_final(text, confidence):
                 final_calls.append((text, confidence))
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.start_streaming.return_value = "callback_session"
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
-                session_id = await processor.start_streaming_stt(
+                session_id = await processor.start_streaming_transcription(
                     language="auto",
                     on_transcript=on_transcript,
                     on_final=on_final
@@ -249,10 +288,12 @@ class TestSTTProviderInterface:
             processor = VoiceProcessor(stt_provider=provider_name, config=config)
             
             # Test file transcription error
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.transcribe_file.side_effect = ProviderError("STT API error")
             
-            with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+            with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                 patch('pathlib.Path.exists', return_value=True), \
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                 with pytest.raises(ProviderError, match="STT API error"):
                     await processor.transcribe_file("nonexistent.wav")
             
@@ -261,7 +302,7 @@ class TestSTTProviderInterface:
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
                 with pytest.raises(ProviderError, match="Streaming failed"):
-                    await processor.start_streaming_stt()
+                    await processor.start_streaming_transcription()
 
     def test_language_support_coverage(self):
         """Test that providers support the eight test languages"""
@@ -276,7 +317,7 @@ class TestSTTProviderInterface:
             
             # Mock provider's language support
             mock_provider = type('Provider', (), {
-                'get_supported_languages': lambda: list(self.TEST_LANGUAGES.keys()) + ["auto"]
+                'get_supported_languages': lambda self: list(TestSTTProviderInterface.TEST_LANGUAGES.keys()) + ["auto"]
             })()
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
@@ -308,7 +349,7 @@ class TestSTTProviderInterface:
                 {"word": "world", "start": 0.6, "end": 1.0, "confidence": 0.90}
             ]
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.transcribe_file.return_value = TranscriptionResult(
                 text="hello world",
                 confidence=0.92,
@@ -317,7 +358,8 @@ class TestSTTProviderInterface:
                 words=mock_words
             )
             
-            with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+            with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                 result = await processor.transcribe_file("test.wav")
                 
                 # Test required fields
@@ -351,7 +393,7 @@ class TestSTTProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(stt_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             
             # Create multiple mock responses
             mock_responses = [
@@ -361,7 +403,8 @@ class TestSTTProviderInterface:
             
             mock_provider.transcribe_file.side_effect = mock_responses
             
-            with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+            with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
                 # Start multiple concurrent transcriptions
                 tasks = [
                     processor.transcribe_file(f"file_{i}.wav")
@@ -391,7 +434,7 @@ class TestSTTProviderInterface:
             processor = VoiceProcessor(stt_provider=provider_name, config=config)
             
             for audio_format in audio_formats:
-                mock_provider = AsyncMock()
+                mock_provider = self._create_mock_provider()
                 mock_provider.transcribe_file.return_value = TranscriptionResult(
                     text=f"Test {audio_format} transcription",
                     confidence=0.88,
@@ -399,14 +442,15 @@ class TestSTTProviderInterface:
                     language_detected="en"
                 )
                 
-                with patch.object(processor, '_get_stt_provider', return_value=mock_provider):
+                with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value=audio_format):
                     result = await processor.transcribe_file(f"test.{audio_format}")
                     
                     assert audio_format in result.text
                     assert result.confidence > 0
                     
                     # Verify file was processed
-                    mock_provider.transcribe_file.assert_called_with(f"test.{audio_format}")
+                    mock_provider.transcribe_file.assert_called_with(f"test.{audio_format}", None, None, audio_format=audio_format)
 
 
 class TestSTTProviderConfiguration:

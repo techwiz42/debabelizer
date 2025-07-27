@@ -325,19 +325,24 @@ class VoiceProcessor:
         """
         if not self._stt_provider:
             await self._auto_select_stt_provider()
+        
+        # Use _get_stt_provider for potential test mocking
+        provider = self._get_stt_provider()
+        if not provider:
+            raise ProviderError("No STT provider available")
             
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"Audio file not found: {file_path}")
             
-        logger.info(f"Transcribing file: {file_path} with {self._stt_provider.name}")
+        logger.info(f"Transcribing file: {file_path} with {provider.name}")
         
         # Auto-detect format if not specified
         if "audio_format" not in kwargs:
             kwargs["audio_format"] = detect_audio_format(file_path)
             
         start_time = datetime.now()
-        result = await self._stt_provider.transcribe_file(
+        result = await provider.transcribe_file(
             str(file_path), language, language_hints, **kwargs
         )
         
@@ -345,7 +350,7 @@ class VoiceProcessor:
         duration = (datetime.now() - start_time).total_seconds()
         self.usage_stats["stt_requests"] += 1
         self.usage_stats["stt_duration"] += duration
-        self.usage_stats["cost_estimate"] += self._stt_provider.get_cost_estimate(duration)
+        self.usage_stats["cost_estimate"] += provider.get_cost_estimate(duration)
         
         return result
         
@@ -374,11 +379,16 @@ class VoiceProcessor:
         """
         if not self._stt_provider:
             await self._auto_select_stt_provider()
+        
+        # Use _get_stt_provider for potential test mocking
+        provider = self._get_stt_provider()
+        if not provider:
+            raise ProviderError("No STT provider available")
             
-        logger.info(f"Transcribing {len(audio_data)} bytes of {audio_format} audio with {self._stt_provider.name}")
+        logger.info(f"Transcribing {len(audio_data)} bytes of {audio_format} audio with {provider.name}")
         
         start_time = datetime.now()
-        result = await self._stt_provider.transcribe_audio(
+        result = await provider.transcribe_audio(
             audio_data, audio_format, sample_rate, language, language_hints, **kwargs
         )
         
@@ -386,7 +396,7 @@ class VoiceProcessor:
         duration = (datetime.now() - start_time).total_seconds()
         self.usage_stats["stt_requests"] += 1
         self.usage_stats["stt_duration"] += duration
-        self.usage_stats["cost_estimate"] += self._stt_provider.get_cost_estimate(duration)
+        self.usage_stats["cost_estimate"] += provider.get_cost_estimate(duration)
         
         return result
         
@@ -413,16 +423,21 @@ class VoiceProcessor:
         """
         if not self._stt_provider:
             await self._auto_select_stt_provider()
+        
+        # Use _get_stt_provider for potential test mocking
+        provider = self._get_stt_provider()
+        if not provider:
+            raise ProviderError("No STT provider available")
             
-        if not self._stt_provider.supports_streaming:
-            raise ProviderError(f"Provider {self._stt_provider.name} does not support streaming")
+        if not provider.supports_streaming:
+            raise ProviderError(f"Provider {provider.name} does not support streaming")
             
-        session_id = await self._stt_provider.start_streaming(
+        session_id = await provider.start_streaming(
             audio_format, sample_rate, language, language_hints, **kwargs
         )
         
         # Track session
-        self.session_manager.create_session(session_id, "stt", self._stt_provider.name)
+        self.session_manager.create_session(session_id, "stt", provider.name)
         self.usage_stats["sessions_created"] += 1
         
         logger.info(f"Started streaming transcription session: {session_id}")
@@ -430,26 +445,29 @@ class VoiceProcessor:
         
     async def stream_audio(self, session_id: str, audio_chunk: bytes) -> None:
         """Send audio chunk to streaming session"""
-        if not self._stt_provider:
+        provider = self._get_stt_provider()
+        if not provider:
             raise ProviderError("No STT provider available")
             
-        await self._stt_provider.stream_audio(session_id, audio_chunk)
+        await provider.stream_audio(session_id, audio_chunk)
         
     async def get_streaming_results(
         self, 
         session_id: str
     ) -> AsyncGenerator[StreamingResult, None]:
         """Get streaming transcription results"""
-        if not self._stt_provider:
+        provider = self._get_stt_provider()
+        if not provider:
             raise ProviderError("No STT provider available")
             
-        async for result in self._stt_provider.get_streaming_results(session_id):
+        async for result in provider.get_streaming_results(session_id):
             yield result
             
     async def stop_streaming_transcription(self, session_id: str) -> None:
         """Stop streaming transcription session"""
-        if self._stt_provider:
-            await self._stt_provider.stop_streaming(session_id)
+        provider = self._get_stt_provider()
+        if provider:
+            await provider.stop_streaming(session_id)
         self.session_manager.end_session(session_id)
         
     # TTS Methods
@@ -673,6 +691,10 @@ class VoiceProcessor:
     @property
     def stt_provider(self) -> Optional[STTProvider]:
         """Get current STT provider instance"""
+        return self._stt_provider
+    
+    def _get_stt_provider(self) -> Optional[STTProvider]:
+        """Get STT provider (for testing purposes)"""
         return self._stt_provider
     
     @property

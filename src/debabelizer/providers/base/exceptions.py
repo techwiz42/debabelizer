@@ -23,6 +23,11 @@ class AuthenticationError(ProviderError):
     pass
 
 
+class ConfigurationError(ProviderError):
+    """Provider configuration error"""
+    pass
+
+
 class RateLimitError(ProviderError):
     """Rate limit exceeded"""
     

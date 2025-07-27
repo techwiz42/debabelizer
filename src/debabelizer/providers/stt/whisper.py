@@ -259,6 +259,11 @@ class WhisperSTTProvider(STTProvider):
         """Whisper doesn't support real-time streaming (file-based only)"""
         return False
     
+    @property
+    def supports_language_detection(self) -> bool:
+        """Whisper supports automatic language detection"""
+        return True
+    
     async def transcribe_file(
         self,
         file_path: str,
