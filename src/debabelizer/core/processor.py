@@ -215,7 +215,9 @@ class VoiceProcessor:
             # Google uses credentials_path instead of api_key
             credentials_path = provider_config.get("credentials_path")
             if credentials_path:
-                return provider_class(credentials_path=credentials_path, **provider_config)
+                # Remove credentials_path from provider_config to avoid duplicate parameter error
+                provider_config_clean = {k: v for k, v in provider_config.items() if k != "credentials_path"}
+                return provider_class(credentials_path=credentials_path, **provider_config_clean)
             elif "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
                 return provider_class(**provider_config)
             else:
@@ -227,7 +229,9 @@ class VoiceProcessor:
             region = provider_config.get("region", "eastus")
             if not api_key:
                 raise ProviderError(f"API key not configured for {provider_name}")
-            return provider_class(api_key, region=region, **provider_config)
+            # Remove api_key and region from provider_config to avoid duplicate parameter error
+            provider_config_clean = {k: v for k, v in provider_config.items() if k not in ["api_key", "region"]}
+            return provider_class(api_key, region=region, **provider_config_clean)
         
         # Special handling for Whisper (no API key required - local processing)
         if provider_name == "whisper":
@@ -237,8 +241,10 @@ class VoiceProcessor:
         api_key = self.config.get_provider_config(provider_name, "api_key")
         if not api_key:
             raise ProviderError(f"API key not configured for {provider_name}")
-            
-        return provider_class(api_key, **provider_config)
+        
+        # Remove api_key from provider_config to avoid duplicate parameter error
+        provider_config_clean = {k: v for k, v in provider_config.items() if k != "api_key"}
+        return provider_class(api_key, **provider_config_clean)
         
     async def _create_tts_provider(self, provider_name: str) -> TTSProvider:
         """Create TTS provider instance"""
@@ -281,7 +287,9 @@ class VoiceProcessor:
             # Google uses credentials_path instead of api_key
             credentials_path = provider_config.get("credentials_path")
             if credentials_path:
-                return provider_class(credentials_path=credentials_path, **provider_config)
+                # Remove credentials_path from provider_config to avoid duplicate parameter error
+                provider_config_clean = {k: v for k, v in provider_config.items() if k != "credentials_path"}
+                return provider_class(credentials_path=credentials_path, **provider_config_clean)
             elif "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
                 return provider_class(**provider_config)
             else:
@@ -293,14 +301,18 @@ class VoiceProcessor:
             region = provider_config.get("region", "eastus")
             if not api_key:
                 raise ProviderError(f"API key not configured for {provider_name}")
-            return provider_class(api_key, region=region, **provider_config)
+            # Remove api_key and region from provider_config to avoid duplicate parameter error
+            provider_config_clean = {k: v for k, v in provider_config.items() if k not in ["api_key", "region"]}
+            return provider_class(api_key, region=region, **provider_config_clean)
         
         # Standard API key providers
         api_key = self.config.get_provider_config(provider_name, "api_key")
         if not api_key:
             raise ProviderError(f"API key not configured for {provider_name}")
-            
-        return provider_class(api_key, **provider_config)
+        
+        # Remove api_key from provider_config to avoid duplicate parameter error
+        provider_config_clean = {k: v for k, v in provider_config.items() if k != "api_key"}
+        return provider_class(api_key, **provider_config_clean)
         
     # STT Methods
     
