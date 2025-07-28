@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-89%2F120%20passing-green.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-105%2F120%20passing-green.svg)](#testing)
 
 Debabelizer is a powerful, universal voice processing library that provides a unified interface for speech-to-text (STT) and text-to-speech (TTS) operations across multiple cloud providers and local engines. Break down language barriers with support for 400+ languages and dialects.
 
@@ -722,24 +722,9 @@ export ELEVENLABS_API_KEY="your_key"
 python -m pytest tests/test_integration.py -v
 ```
 
-## 📚 Documentation
-
-### API Documentation
-- [Provider Documentation](docs/providers.md)
-- [Configuration Guide](docs/configuration.md)
-- [Examples](examples/)
-- [Migration Guide](docs/migration.md)
-
-### Examples
-Check out the [examples/](examples/) directory for:
-- `basic_transcription.py` - Simple STT usage
-- `text_to_speech.py` - Basic TTS operations
-- `streaming_conversation.py` - Real-time processing
-- `telephony_integration.py` - Phone system integration
-
 ## 🤝 Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions! 
 
 ### Development Setup
 ```bash
@@ -758,13 +743,12 @@ pre-commit install
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
 ## 🆘 Support
 
-- **Issues**: [GitHub Issues](https://github.com/your-org/debabelizer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/debabelizer/discussions)
-- **Documentation**: [Read the Docs](https://debabelizer.readthedocs.io)
+- **Issues**: [GitHub Issues](https://github.com/techwiz42/debabelizer/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/techwiz42/debabelizer/discussions)
 
 ## 🙏 Acknowledgments
 
