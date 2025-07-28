@@ -10,14 +10,14 @@ Debabelizer is a powerful, universal voice processing library that provides a un
 
 ## 🌟 Features
 
-### 🎯 **Universal Provider Support**
+### 🎯 **Pluggable Provider Support**
 - **5 STT Providers**: Soniox, Deepgram, Google Cloud, Azure, OpenAI Whisper
 - **4 TTS Providers**: ElevenLabs, OpenAI, Google Cloud, Azure
 - **Unified API**: Switch providers without changing code
 - **Smart Fallbacks**: Automatic provider selection based on optimization strategy
 
 ### 🌍 **Comprehensive Language Support**
-- **400+ languages and dialects** across all providers
+- **40+ languages and dialects** across all providers
 - **Automatic language detection** 
 - **Multi-language processing** in single workflows
 - **Custom language hints** for improved accuracy
