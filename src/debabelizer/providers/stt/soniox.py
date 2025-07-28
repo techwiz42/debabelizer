@@ -21,6 +21,7 @@ from ..base.exceptions import (
     ProviderError, AuthenticationError, ConnectionError, 
     StreamingError, UnsupportedFormatError
 )
+from ...utils.audio import AudioConverter
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class SonioxSTTProvider(STTProvider):
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self._receive_tasks: Dict[str, asyncio.Task] = {}
+        self.audio_converter = AudioConverter()
         
     @property
     def name(self) -> str:
@@ -181,6 +183,38 @@ class SonioxSTTProvider(STTProvider):
     ) -> str:
         """Start a streaming transcription session"""
         
+        # Handle format conversion for provider-agnostic usage
+        native_soniox_formats = ["pcm_s16le", "mulaw", "mp3", "flac"]
+        format_mapping = {
+            "wav": "pcm_s16le",
+            "pcm": "pcm_s16le", 
+            "mulaw": "mulaw",
+            "mp3": "mp3",
+            "flac": "flac"
+        }
+        
+        # Check if we need format conversion
+        needs_conversion = False
+        soniox_format = format_mapping.get(audio_format.lower(), audio_format.lower())
+        
+        if soniox_format not in native_soniox_formats:
+            # Check if we can convert this format
+            if audio_format.lower() in ["webm", "ogg", "m4a", "aac"]:
+                if self.audio_converter.ffmpeg_available:
+                    logger.info(f"Will convert {audio_format} to PCM for Soniox")
+                    soniox_format = "pcm_s16le"
+                    needs_conversion = True
+                else:
+                    raise UnsupportedFormatError(
+                        f"Audio format '{audio_format}' requires FFmpeg for conversion, but FFmpeg is not available", 
+                        "soniox"
+                    )
+            else:
+                raise UnsupportedFormatError(
+                    f"Audio format '{audio_format}' not supported by Soniox. Supported formats: wav, pcm, mulaw, mp3, flac, webm (with FFmpeg)", 
+                    "soniox"
+                )
+        
         session_id = str(uuid.uuid4())
         
         try:
@@ -200,7 +234,7 @@ class SonioxSTTProvider(STTProvider):
             # Send Soniox configuration 
             config = {
                 "api_key": self.api_key,
-                "audio_format": audio_format,
+                "audio_format": soniox_format,
                 "sample_rate": sample_rate,
                 "num_channels": 1,  # Mono audio
                 "model": self.model,
@@ -216,12 +250,32 @@ class SonioxSTTProvider(STTProvider):
                 
             await websocket.send(json.dumps(config))
             
+            # Wait for initial response to confirm connection
+            try:
+                initial_message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                initial_data = json.loads(initial_message)
+                
+                # Check for immediate errors
+                if "error" in initial_data:
+                    error_msg = initial_data.get("error", "Unknown error")
+                    raise ProviderError(f"Soniox configuration error: {error_msg}", "soniox")
+                    
+                logger.debug(f"Soniox initial response: {initial_data}")
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"No initial response from Soniox for session {session_id}, proceeding anyway")
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid initial response from Soniox for session {session_id}")
+            
             # Store session info
             self.sessions[session_id] = {
                 "websocket": websocket,
                 "results_queue": asyncio.Queue(),
                 "is_active": True,
-                "config": config
+                "config": config,
+                "needs_conversion": needs_conversion,
+                "input_format": audio_format.lower(),
+                "soniox_format": soniox_format
             }
             
             # Start receive task
@@ -241,15 +295,49 @@ class SonioxSTTProvider(STTProvider):
         """Send audio chunk to streaming session"""
         
         if session_id not in self.sessions:
-            raise StreamingError(f"Session {session_id} not found", "soniox")
+            raise StreamingError(
+                f"Session {session_id} not found. Available sessions: {list(self.sessions.keys())}", 
+                "soniox"
+            )
             
         session = self.sessions[session_id]
         if not session["is_active"]:
-            raise StreamingError(f"Session {session_id} is not active", "soniox")
+            # Check if the receive task is still running
+            receive_task = self._receive_tasks.get(session_id)
+            task_status = "unknown"
+            if receive_task:
+                if receive_task.done():
+                    try:
+                        receive_task.result()
+                        task_status = "completed normally"
+                    except Exception as e:
+                        task_status = f"completed with error: {e}"
+                else:
+                    task_status = "still running"
+            
+            raise StreamingError(
+                f"Session {session_id} is not active. Receive task status: {task_status}", 
+                "soniox"
+            )
             
         try:
-            await session["websocket"].send(audio_chunk)
+            # Convert audio if needed
+            audio_to_send = audio_chunk
+            if session.get("needs_conversion", False):
+                logger.debug(f"Converting {len(audio_chunk)} bytes from {session['input_format']} to {session['soniox_format']}")
+                audio_to_send = await self.audio_converter.convert_audio(
+                    audio_chunk,
+                    session["input_format"],
+                    session["soniox_format"].replace("_s16le", ""),  # Convert pcm_s16le to pcm
+                    sample_rate=16000,
+                    channels=1
+                )
+                logger.debug(f"Converted to {len(audio_to_send)} bytes")
+            
+            logger.debug(f"Sending {len(audio_to_send)} bytes to Soniox session {session_id}")
+            await session["websocket"].send(audio_to_send)
         except Exception as e:
+            logger.error(f"Failed to send audio to Soniox session {session_id}: {e}")
             raise StreamingError(f"Failed to send audio: {e}", "soniox")
             
     async def get_streaming_results(
@@ -310,9 +398,12 @@ class SonioxSTTProvider(STTProvider):
         websocket = session["websocket"]
         results_queue = session["results_queue"]
         
+        logger.debug(f"Starting receive loop for Soniox session {session_id}")
+        
         while session["is_active"]:
             try:
                 message = await websocket.recv()
+                logger.debug(f"Received message from Soniox: {message[:200]}...")
                 data = json.loads(message)
                 
                 # Handle Soniox response format
@@ -382,16 +473,19 @@ class SonioxSTTProvider(STTProvider):
                     logger.error(f"❌ Soniox error: {error_msg}")
                     raise ProviderError(error_msg, "soniox")
                     
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"Soniox connection closed for session {session_id}")
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.info(f"Soniox connection closed for session {session_id}: {e}")
                 session["is_active"] = False
                 break
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Soniox message: {e}")
+                logger.error(f"Failed to parse Soniox message for session {session_id}: {e}")
+                # Continue processing other messages
             except Exception as e:
-                logger.error(f"Error in Soniox receive loop: {e}")
-                session["is_active"] = False
-                break
+                logger.error(f"Error in Soniox receive loop for session {session_id}: {e}", exc_info=True)
+                # Don't immediately mark as inactive unless it's a critical error
+                if isinstance(e, (ConnectionError, OSError)):
+                    session["is_active"] = False
+                    break
                 
     def get_cost_estimate(self, duration_seconds: float) -> float:
         """Estimate cost for Soniox transcription"""
