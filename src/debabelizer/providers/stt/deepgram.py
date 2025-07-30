@@ -65,7 +65,10 @@ class DeepgramSTTProvider(STTProvider):
         }
         
     def _prepare_options(self, language: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Prepare Deepgram API options"""
+        """Prepare Deepgram API options for prerecorded transcription"""
+        # Extract detect_language but don't pass it to Deepgram API
+        detect_language = kwargs.get("detect_language", False)
+        
         options = {
             "model": kwargs.get("model", self.default_model),
             "language": language or self.default_language,
@@ -78,8 +81,7 @@ class DeepgramSTTProvider(STTProvider):
             "alternatives": kwargs.get("alternatives", 1),
             "numerals": kwargs.get("numerals", True),
             "search": kwargs.get("search", []),
-            "keywords": kwargs.get("keywords", []),
-            "detect_language": kwargs.get("detect_language", False)
+            "keywords": kwargs.get("keywords", [])
         }
         
         # Add confidence scores
@@ -90,6 +92,38 @@ class DeepgramSTTProvider(STTProvider):
         if kwargs.get("words", True):
             options["words"] = True
             
+        return options
+        
+    def _prepare_streaming_options(self, language: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Prepare Deepgram API options for streaming transcription"""
+        # Extract detect_language but handle it separately
+        detect_language = kwargs.get("detect_language", False)
+        
+        options = {
+            "model": kwargs.get("model", self.default_model),
+            "punctuate": kwargs.get("punctuate", True),
+            "smart_format": kwargs.get("smart_format", True),
+            "profanity_filter": kwargs.get("profanity_filter", False),
+            "numerals": kwargs.get("numerals", True),
+            "interim_results": kwargs.get("interim_results", True),
+            "utterance_end_ms": kwargs.get("utterance_end_ms", 1500),
+            "vad_events": kwargs.get("vad_events", True),
+            "encoding": "linear16",
+            "sample_rate": kwargs.get("sample_rate", 16000),
+            "channels": kwargs.get("channels", 1)
+        }
+        
+        # Handle language and auto-detection
+        # Deepgram automatically detects language when no language is specified
+        if language and language != "auto":
+            options["language"] = language
+        elif not language or language == "auto" or detect_language:
+            # For auto-detection, don't set language
+            # Deepgram will automatically detect the language
+            pass
+        else:
+            options["language"] = self.default_language
+        
         return options
         
     async def transcribe_file(
@@ -111,9 +145,10 @@ class DeepgramSTTProvider(STTProvider):
             # Prepare options
             base_options = self._prepare_options(language, **kwargs)
             
-            # Handle language detection
-            if language_hints and not language:
-                base_options["detect_language"] = True
+            # Handle language detection - Deepgram detects automatically when no language is set
+            if not language or language == "auto" or kwargs.get("detect_language", False):
+                # Remove language from options for auto-detection
+                base_options.pop("language", None)
                 
             options = PrerecordedOptions(**base_options)
             
@@ -227,7 +262,7 @@ class DeepgramSTTProvider(STTProvider):
             base_options = self._prepare_options(language, **kwargs)
             
             # Add audio format specific options
-            if audio_format.lower() in ["pcm", "raw"]:
+            if audio_format.lower() in ["pcm", "raw", "linear16"]:
                 base_options["encoding"] = "linear16"
                 base_options["sample_rate"] = sample_rate
                 base_options["channels"] = kwargs.get("channels", 1)
@@ -339,18 +374,17 @@ class DeepgramSTTProvider(STTProvider):
             # Initialize client
             deepgram = DeepgramClient(self.api_key)
             
-            # Prepare options
-            base_options = self._prepare_options(language, **kwargs)
+            # Prepare options (use streaming-specific options)
+            base_options = self._prepare_streaming_options(
+                language, 
+                sample_rate=sample_rate,
+                channels=kwargs.get("channels", 1),
+                **kwargs
+            )
             
-            # Add streaming-specific options
-            base_options.update({
-                "encoding": "linear16" if audio_format.lower() in ["pcm", "raw"] else audio_format,
-                "sample_rate": sample_rate,
-                "channels": kwargs.get("channels", 1),
-                "interim_results": kwargs.get("interim_results", True),
-                "endpointing": kwargs.get("endpointing", 300),  # 300ms silence
-                "vad_events": kwargs.get("vad_events", True)
-            })
+            # Override encoding if needed
+            if audio_format.lower() not in ["pcm", "raw", "linear16"]:
+                base_options["encoding"] = audio_format
             
             options = LiveOptions(**base_options)
             
@@ -416,6 +450,25 @@ class DeepgramSTTProvider(STTProvider):
             
         except Exception as e:
             raise ProviderError(f"Failed to send audio to session {session_id}: {e}", "deepgram")
+    
+    async def finalize_streaming(self, session_id: str) -> None:
+        """Send finalize message to get final transcription results"""
+        
+        if not hasattr(self, '_streaming_sessions') or session_id not in self._streaming_sessions:
+            raise ProviderError(f"Streaming session {session_id} not found", "deepgram")
+            
+        session = self._streaming_sessions[session_id]
+        
+        if not session["connected"]:
+            return
+            
+        try:
+            # Send finalize message as JSON
+            finalize_message = json.dumps({"type": "Finalize"})
+            await session["connection"].send(finalize_message)
+            
+        except Exception as e:
+            logger.error(f"Failed to send finalize message to session {session_id}: {e}")
             
     async def get_streaming_results(
         self, 
@@ -435,18 +488,76 @@ class DeepgramSTTProvider(STTProvider):
                     # Wait for results with timeout
                     result = await asyncio.wait_for(results_queue.get(), timeout=1.0)
                     
-                    # Parse Deepgram result
+                    # Handle VAD events
+                    if hasattr(result, 'type'):
+                        if result.type == 'SpeechStarted':
+                            # Speech activity detected
+                            streaming_result = StreamingResult(
+                                session_id=session_id,
+                                is_final=False,
+                                text="",
+                                confidence=1.0,
+                                timestamp=None,
+                                processing_time_ms=0,
+                                metadata={
+                                    "event": "speech_started",
+                                    "vad": True
+                                }
+                            )
+                            yield streaming_result
+                            continue
+                        elif result.type == 'UtteranceEnd':
+                            # End of utterance detected
+                            streaming_result = StreamingResult(
+                                session_id=session_id,
+                                is_final=True,
+                                text="",
+                                confidence=1.0,
+                                timestamp=None,
+                                processing_time_ms=0,
+                                metadata={
+                                    "event": "utterance_end",
+                                    "speech_final": True
+                                }
+                            )
+                            yield streaming_result
+                            continue
+                    
+                    # Parse transcription result
                     if hasattr(result, 'channel') and result.channel.alternatives:
                         alternative = result.channel.alternatives[0]
+                        
+                        # Extract metadata
+                        metadata = {
+                            "is_final": getattr(result, 'is_final', False),
+                            "speech_final": getattr(result, 'speech_final', False)
+                        }
+                        
+                        # Add detected language if available
+                        if hasattr(result, 'channel_index') and hasattr(result.channel_index[0], 'detected_language'):
+                            metadata["detected_language"] = result.channel_index[0].detected_language
+                        
+                        # Extract words if available
+                        if hasattr(alternative, 'words') and alternative.words:
+                            metadata["words"] = [
+                                {
+                                    "word": word.word,
+                                    "start": word.start,
+                                    "end": word.end,
+                                    "confidence": getattr(word, 'confidence', 1.0)
+                                }
+                                for word in alternative.words
+                            ]
                         
                         # Create streaming result
                         streaming_result = StreamingResult(
                             session_id=session_id,
-                            is_final=getattr(result, 'is_final', False),
+                            is_final=metadata["is_final"],
                             text=alternative.transcript,
                             confidence=getattr(alternative, 'confidence', 1.0),
                             timestamp=None,  # Will be set by session manager
-                            processing_time_ms=0
+                            processing_time_ms=0,
+                            metadata=metadata
                         )
                         
                         yield streaming_result

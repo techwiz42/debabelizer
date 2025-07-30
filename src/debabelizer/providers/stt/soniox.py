@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import uuid
+import time
 from typing import AsyncGenerator, Dict, Any, Optional, List
 import websockets
 from datetime import datetime
@@ -46,6 +47,8 @@ class SonioxSTTProvider(STTProvider):
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self._receive_tasks: Dict[str, asyncio.Task] = {}
+        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}  # Per-session locks
         self.audio_converter = AudioConverter()
         
     @property
@@ -104,6 +107,11 @@ class SonioxSTTProvider(STTProvider):
                 chunk = audio_data[i:i + chunk_size]
                 await self.stream_audio(session_id, chunk)
                 
+            # Signal that no more audio is expected
+            if session_id in self.sessions:
+                async with self.sessions[session_id]["lock"]:
+                    self.sessions[session_id]["has_pending_audio"] = False
+            
             # Collect results
             final_result = None
             async for result in self.get_streaming_results(session_id):
@@ -157,6 +165,11 @@ class SonioxSTTProvider(STTProvider):
         
         try:
             await self.stream_audio(session_id, audio_data)
+            
+            # Signal that no more audio is expected
+            if session_id in self.sessions:
+                async with self.sessions[session_id]["lock"]:
+                    self.sessions[session_id]["has_pending_audio"] = False
             
             # Collect final result
             final_result = None
@@ -223,12 +236,13 @@ class SonioxSTTProvider(STTProvider):
             
             logger.info(f"🔌 Starting Soniox streaming session: {session_id}")
             
-            # Connect to Soniox WebSocket endpoint
+            # Connect to Soniox WebSocket endpoint with stable timeouts
             websocket = await websockets.connect(
                 "wss://stt-rt.soniox.com/transcribe-websocket",
                 additional_headers=headers,
-                ping_interval=20,
-                ping_timeout=10
+                ping_interval=None,  # Disable ping/pong - let server handle keepalive
+                ping_timeout=None,   # Disable ping timeout
+                close_timeout=30     # Longer close timeout
             )
             
             # Send Soniox configuration 
@@ -250,9 +264,9 @@ class SonioxSTTProvider(STTProvider):
                 
             await websocket.send(json.dumps(config))
             
-            # Wait for initial response to confirm connection
+            # Wait for initial response to confirm connection with longer timeout
             try:
-                initial_message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                initial_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)  # Increased from 5.0
                 initial_data = json.loads(initial_message)
                 
                 # Check for immediate errors
@@ -260,22 +274,33 @@ class SonioxSTTProvider(STTProvider):
                     error_msg = initial_data.get("error", "Unknown error")
                     raise ProviderError(f"Soniox configuration error: {error_msg}", "soniox")
                     
-                logger.debug(f"Soniox initial response: {initial_data}")
+                logger.info(f"✅ Soniox session {session_id} configured successfully: {initial_data}")
                 
             except asyncio.TimeoutError:
-                logger.warning(f"No initial response from Soniox for session {session_id}, proceeding anyway")
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid initial response from Soniox for session {session_id}")
+                logger.warning(f"No initial response from Soniox for session {session_id} within 10s, proceeding anyway")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid initial response from Soniox for session {session_id}: {e}")
+            except Exception as e:
+                logger.error(f"Error getting initial response from Soniox for session {session_id}: {e}")
             
-            # Store session info
+            # Store session info with lock
+            session_lock = asyncio.Lock()
+            self._session_locks[session_id] = session_lock
+            
             self.sessions[session_id] = {
                 "websocket": websocket,
                 "results_queue": asyncio.Queue(),
                 "is_active": True,
+                "is_connected": True,
                 "config": config,
                 "needs_conversion": needs_conversion,
                 "input_format": audio_format.lower(),
-                "soniox_format": soniox_format
+                "soniox_format": soniox_format,
+                "reconnect_attempts": 0,
+                "max_reconnect_attempts": 3,
+                "lock": session_lock,  # Store reference to lock in session
+                "last_audio_time": None,  # Track when audio was last sent
+                "has_pending_audio": False  # Track if we expect more audio
             }
             
             # Start receive task
@@ -301,24 +326,41 @@ class SonioxSTTProvider(STTProvider):
             )
             
         session = self.sessions[session_id]
-        if not session["is_active"]:
-            # Check if the receive task is still running
-            receive_task = self._receive_tasks.get(session_id)
-            task_status = "unknown"
-            if receive_task:
-                if receive_task.done():
-                    try:
-                        receive_task.result()
-                        task_status = "completed normally"
-                    except Exception as e:
-                        task_status = f"completed with error: {e}"
-                else:
-                    task_status = "still running"
+        session_lock = session["lock"]
+        
+        # Check session state under lock
+        async with session_lock:
+            if not session["is_active"]:
+                raise StreamingError(
+                    f"Session {session_id} has been terminated", 
+                    "soniox"
+                )
+                
+            # If not connected, try to reconnect
+            if not session["is_connected"]:
+                if session_id not in self._reconnect_tasks or self._reconnect_tasks[session_id].done():
+                    logger.info(f"Starting reconnection for session {session_id}")
+                    self._reconnect_tasks[session_id] = asyncio.create_task(
+                        self._reconnect_session(session_id)
+                    )
+        
+        # Wait for reconnection to complete (outside lock to avoid deadlock)
+        if not session["is_connected"]:
+            for _ in range(10):  # Wait up to 1 second
+                await asyncio.sleep(0.1)
+                async with session_lock:
+                    if session["is_connected"]:
+                        break
             
-            raise StreamingError(
-                f"Session {session_id} is not active. Receive task status: {task_status}", 
-                "soniox"
-            )
+            async with session_lock:
+                if not session["is_connected"]:
+                    logger.warning(f"Session {session_id} reconnection still in progress, will retry audio send")
+                    # Don't raise error immediately, let reconnection continue
+                    return
+                websocket = session["websocket"]
+        else:
+            async with session_lock:
+                websocket = session["websocket"]
             
         try:
             # Convert audio if needed
@@ -335,10 +377,31 @@ class SonioxSTTProvider(STTProvider):
                 logger.debug(f"Converted to {len(audio_to_send)} bytes")
             
             logger.debug(f"Sending {len(audio_to_send)} bytes to Soniox session {session_id}")
-            await session["websocket"].send(audio_to_send)
+            
+            # Update session activity tracking
+            async with session_lock:
+                session["last_audio_time"] = time.time()
+                session["has_pending_audio"] = True
+            
+            await websocket.send(audio_to_send)
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"Connection closed while sending audio to session {session_id}: {e}")
+            async with session_lock:
+                session["is_connected"] = False
+                # Mark for reconnection but don't raise error
+                if session_id not in self._reconnect_tasks or self._reconnect_tasks[session_id].done():
+                    self._reconnect_tasks[session_id] = asyncio.create_task(
+                        self._reconnect_session(session_id)
+                    )
         except Exception as e:
             logger.error(f"Failed to send audio to Soniox session {session_id}: {e}")
-            raise StreamingError(f"Failed to send audio: {e}", "soniox")
+            # Only raise error for critical failures, not connection issues
+            if isinstance(e, (websockets.exceptions.WebSocketException, ConnectionError, OSError)):
+                logger.warning(f"Network error sending audio, will attempt reconnection")
+                async with session_lock:
+                    session["is_connected"] = False
+            else:
+                raise StreamingError(f"Failed to send audio: {e}", "soniox")
             
     async def get_streaming_results(
         self, 
@@ -370,7 +433,13 @@ class SonioxSTTProvider(STTProvider):
             return
             
         session = self.sessions[session_id]
-        session["is_active"] = False
+        session_lock = session["lock"]
+        
+        # Mark session as inactive under lock
+        async with session_lock:
+            session["is_active"] = False
+            session["is_connected"] = False
+            session["has_pending_audio"] = False  # Clear pending audio flag
         
         # Cancel receive task
         if session_id in self._receive_tasks:
@@ -381,111 +450,287 @@ class SonioxSTTProvider(STTProvider):
                 pass
             del self._receive_tasks[session_id]
             
+        # Cancel reconnect task
+        if session_id in self._reconnect_tasks:
+            self._reconnect_tasks[session_id].cancel()
+            try:
+                await self._reconnect_tasks[session_id]
+            except asyncio.CancelledError:
+                pass
+            del self._reconnect_tasks[session_id]
+            
         # Close WebSocket
         try:
             await session["websocket"].close()
         except Exception:
             pass
             
-        # Remove session
+        # Clean up session and locks
         del self.sessions[session_id]
+        if session_id in self._session_locks:
+            del self._session_locks[session_id]
         logger.info(f"🔌 Stopped Soniox streaming session: {session_id}")
         
+    async def _reconnect_session(self, session_id: str) -> bool:
+        """Attempt to reconnect a session with exponential backoff"""
+        
+        if session_id not in self.sessions:
+            return False
+            
+        session = self.sessions[session_id]
+        session_lock = session["lock"]
+        
+        for attempt in range(session["max_reconnect_attempts"]):
+            try:
+                logger.info(f"Reconnection attempt {attempt + 1}/{session['max_reconnect_attempts']} for session {session_id}")
+                
+                # Close old websocket if still open
+                try:
+                    await session["websocket"].close()
+                except:
+                    pass
+                
+                # Wait with exponential backoff
+                if attempt > 0:
+                    wait_time = min(2 ** attempt, 10)  # Max 10 seconds
+                    await asyncio.sleep(wait_time)
+                
+                # Create new WebSocket connection
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                websocket = await websockets.connect(
+                    "wss://stt-rt.soniox.com/transcribe-websocket",
+                    additional_headers=headers,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=30
+                )
+                
+                # Send configuration
+                await websocket.send(json.dumps(session["config"]))
+                
+                # Wait for initial response
+                try:
+                    initial_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                    initial_data = json.loads(initial_message)
+                    
+                    if "error" in initial_data:
+                        logger.error(f"Soniox configuration error on reconnect: {initial_data['error']}")
+                        continue
+                        
+                except asyncio.TimeoutError:
+                    logger.warning(f"No initial response on reconnect for session {session_id}, proceeding")
+                
+                # Update session under lock
+                async with session_lock:
+                    session["websocket"] = websocket
+                    session["is_connected"] = True
+                    session["reconnect_attempts"] = attempt + 1
+                
+                # Don't restart receive loop here - let the existing loop continue
+                # The loop should detect the new websocket and continue
+                
+                logger.info(f"✅ Successfully reconnected session {session_id}")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Reconnection attempt {attempt + 1} failed for session {session_id}: {e}")
+                continue
+        
+        logger.error(f"Failed to reconnect session {session_id} after {session['max_reconnect_attempts']} attempts")
+        async with session_lock:
+            session["is_connected"] = False
+        return False
+    
     async def _receive_loop(self, session_id: str):
         """Internal loop to receive and process messages from Soniox"""
         
         session = self.sessions[session_id]
-        websocket = session["websocket"]
+        session_lock = session["lock"]
         results_queue = session["results_queue"]
         
         logger.debug(f"Starting receive loop for Soniox session {session_id}")
         
-        while session["is_active"]:
-            try:
-                message = await websocket.recv()
-                logger.debug(f"Received message from Soniox: {message[:200]}...")
-                data = json.loads(message)
-                
-                # Handle Soniox response format
-                if "tokens" in data:
-                    tokens = data.get("tokens", [])
+        try:
+            while session["is_active"]:
+                # Always get fresh websocket reference under lock
+                async with session_lock:
+                    if not session["is_active"]:
+                        break
+                    websocket = session["websocket"]
+                    is_connected = session["is_connected"]
+                # Skip if not connected
+                if not is_connected:
+                    await asyncio.sleep(0.1)
+                    continue
                     
-                    if tokens:
-                        # Extract text from tokens
-                        text_parts = []
-                        for token in tokens:
-                            if isinstance(token, dict) and "text" in token:
-                                text_parts.append(token["text"])
-                            elif isinstance(token, str):
-                                text_parts.append(token)
+                try:
+                    # Use timeout for recv to allow periodic health checks
+                    message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                    logger.debug(f"Received message from Soniox: {message[:200]}...")
+                    data = json.loads(message)
+                    
+                    # Handle Soniox response format
+                    if "tokens" in data:
+                        tokens = data.get("tokens", [])
                         
-                        if text_parts:
-                            text = "".join(text_parts)
-                            
-                            # Extract language from tokens
-                            detected_language = "unknown"
-                            if tokens:
-                                for token in tokens:
-                                    if isinstance(token, dict) and "language" in token:
-                                        detected_language = token["language"]
-                                        break
-                            
-                            # Calculate average confidence
-                            confidences = []
+                        if tokens:
+                            # Extract text from tokens
+                            text_parts = []
                             for token in tokens:
-                                if isinstance(token, dict) and "confidence" in token:
-                                    confidences.append(token["confidence"])
+                                if isinstance(token, dict) and "text" in token:
+                                    text_parts.append(token["text"])
+                                elif isinstance(token, str):
+                                    text_parts.append(token)
                             
-                            avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-                            
-                            # Determine if final (Soniox uses is_final field in tokens)
-                            is_final = any(
-                                token.get("is_final", False) 
-                                for token in tokens 
-                                if isinstance(token, dict)
-                            )
-                            
-                            # Create transcription result
-                            result = TranscriptionResult(
-                                text=text,
-                                language_detected=detected_language,
-                                confidence=avg_confidence,
-                                is_final=is_final,
-                                tokens=tokens,
-                                metadata={
-                                    "processing_time_ms": data.get("final_audio_proc_ms", 0),
-                                    "total_audio_proc_ms": data.get("total_audio_proc_ms", 0)
-                                }
-                            )
-                            
-                            # Create streaming result
-                            streaming_result = StreamingResult(
-                                result=result,
-                                session_id=session_id,
-                                timestamp=datetime.now(),
-                                processing_time_ms=data.get("final_audio_proc_ms", 0)
-                            )
-                            
-                            await results_queue.put(streaming_result)
-                            
-                elif "error" in data:
-                    error_msg = data.get("error", "Unknown error")
-                    logger.error(f"❌ Soniox error: {error_msg}")
-                    raise ProviderError(error_msg, "soniox")
+                            if text_parts:
+                                text = "".join(text_parts)
+                                
+                                # Extract language from tokens
+                                detected_language = "unknown"
+                                if tokens:
+                                    for token in tokens:
+                                        if isinstance(token, dict) and "language" in token:
+                                            detected_language = token["language"]
+                                            break
+                                
+                                # Calculate average confidence
+                                confidences = []
+                                for token in tokens:
+                                    if isinstance(token, dict) and "confidence" in token:
+                                        confidences.append(token["confidence"])
+                                
+                                avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+                                
+                                # Determine if final (Soniox uses is_final field in tokens)
+                                is_final = any(
+                                    token.get("is_final", False) 
+                                    for token in tokens 
+                                    if isinstance(token, dict)
+                                )
+                                
+                                # Create transcription result
+                                result = TranscriptionResult(
+                                    text=text,
+                                    language_detected=detected_language,
+                                    confidence=avg_confidence,
+                                    is_final=is_final,
+                                    tokens=tokens,
+                                    metadata={
+                                        "processing_time_ms": data.get("final_audio_proc_ms", 0),
+                                        "total_audio_proc_ms": data.get("total_audio_proc_ms", 0)
+                                    }
+                                )
+                                
+                                # Create streaming result - match base interface
+                                streaming_result = StreamingResult(
+                                    session_id=session_id,
+                                    is_final=is_final,
+                                    text=text,
+                                    confidence=avg_confidence,
+                                    timestamp=datetime.now(),
+                                    processing_time_ms=data.get("final_audio_proc_ms", 0)
+                                )
+                                
+                                await results_queue.put(streaming_result)
+                                
+                    elif "error" in data:
+                        error_msg = data.get("error", "Unknown error")
+                        logger.error(f"❌ Soniox error: {error_msg}")
+                        # Don't raise immediately - try to continue
+                        continue
                     
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.info(f"Soniox connection closed for session {session_id}: {e}")
+                except (websockets.exceptions.ConnectionClosed, 
+                        websockets.exceptions.ConnectionClosedError, 
+                        websockets.exceptions.ConnectionClosedOK) as e:
+                    logger.warning(f"Soniox connection closed for session {session_id}: {e}")
+                    
+                    # Update connection state under lock
+                    async with session_lock:
+                        session["is_connected"] = False
+                    
+                    # For normal close (1000), only reconnect if there's recent audio activity
+                    if hasattr(e, 'code') and e.code == 1000:
+                        current_time = time.time()
+                        should_reconnect = False
+                        
+                        async with session_lock:
+                            last_audio_time = session.get("last_audio_time")
+                            has_pending_audio = session.get("has_pending_audio", False)
+                            
+                            # Only reconnect if audio was sent recently (within 60 seconds) or we expect more audio
+                            if last_audio_time and (current_time - last_audio_time) < 60:
+                                should_reconnect = True
+                                logger.info(f"Normal close detected for session {session_id} with recent audio activity, attempting reconnection")
+                            elif has_pending_audio:
+                                should_reconnect = True
+                                logger.info(f"Normal close detected for session {session_id} with pending audio, attempting reconnection")
+                            else:
+                                logger.info(f"Normal close detected for session {session_id} with no recent audio activity, ending session gracefully")
+                        
+                        if should_reconnect:
+                            # Start reconnection task if not already running
+                            async with session_lock:
+                                if session_id not in self._reconnect_tasks or self._reconnect_tasks[session_id].done():
+                                    self._reconnect_tasks[session_id] = asyncio.create_task(
+                                        self._reconnect_session(session_id)
+                                    )
+                            
+                            # Wait for reconnection to complete
+                            for _ in range(30):  # Wait up to 3 seconds
+                                await asyncio.sleep(0.1)
+                                async with session_lock:
+                                    if session["is_connected"]:
+                                        logger.info(f"Reconnected session {session_id}, resuming receive loop")
+                                        break
+                            else:
+                                logger.error(f"Reconnection failed for session {session_id}, exiting receive loop")
+                                break
+                            continue
+                        else:
+                            # No recent activity, end session gracefully
+                            async with session_lock:
+                                session["is_active"] = False
+                            break
+                    else:
+                        # For abnormal closes, exit the receive loop
+                        break
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Soniox message for session {session_id}: {e}")
+                    # Continue processing other messages instead of breaking
+                    continue
+                except asyncio.TimeoutError:
+                    # Timeout is normal - just continue the loop to allow health check
+                    logger.debug(f"Soniox receive timeout for session {session_id} (normal keepalive)")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in Soniox receive loop for session {session_id}: {e}", exc_info=True)
+                    
+                    # Classify error types for appropriate handling
+                    if isinstance(e, (websockets.exceptions.WebSocketException, ConnectionError, OSError)):
+                        logger.warning(f"Network/connection error in session {session_id}, marking as disconnected")
+                        session["is_connected"] = False
+                        # Try to reconnect for network errors
+                        if session_id not in self._reconnect_tasks or self._reconnect_tasks[session_id].done():
+                            self._reconnect_tasks[session_id] = asyncio.create_task(
+                                self._reconnect_session(session_id)
+                            )
+                        break
+                    elif isinstance(e, (PermissionError, AuthenticationError)):
+                        logger.error(f"Authentication error in session {session_id}, terminating session")
+                        session["is_active"] = False
+                        break
+                    else:
+                        # For other errors (parsing, etc.), log but continue
+                        logger.warning(f"Non-critical error in session {session_id}, continuing: {e}")
+                        continue
+        except Exception as e:
+            logger.error(f"Fatal error in Soniox receive loop for session {session_id}: {e}", exc_info=True)
+            session["is_connected"] = False
+        finally:
+            logger.info(f"Receive loop ended for session {session_id}")
+            # Only mark session as inactive if explicitly stopped, not on connection issues
+            if session.get("is_connected", True):  # If we're still "connected", this was a clean stop
                 session["is_active"] = False
-                break
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Soniox message for session {session_id}: {e}")
-                # Continue processing other messages
-            except Exception as e:
-                logger.error(f"Error in Soniox receive loop for session {session_id}: {e}", exc_info=True)
-                # Don't immediately mark as inactive unless it's a critical error
-                if isinstance(e, (ConnectionError, OSError)):
-                    session["is_active"] = False
-                    break
                 
     def get_cost_estimate(self, duration_seconds: float) -> float:
         """Estimate cost for Soniox transcription"""
