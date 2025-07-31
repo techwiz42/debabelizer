@@ -577,7 +577,46 @@ class SonioxSTTProvider(STTProvider):
                         tokens = data.get("tokens", [])
                         
                         if tokens:
-                            # Extract text from tokens
+                            # Extract language and common metadata once
+                            detected_language = "unknown"
+                            for token in tokens:
+                                if isinstance(token, dict) and "language" in token:
+                                    detected_language = token["language"]
+                                    break
+                            
+                            # Process each token individually for word-level streaming
+                            for token in tokens:
+                                if isinstance(token, dict) and "text" in token:
+                                    token_text = token["text"]
+                                    token_confidence = token.get("confidence", 0.0)
+                                    token_is_final = token.get("is_final", False)
+                                    
+                                    # Create streaming result for each token/word
+                                    streaming_result = StreamingResult(
+                                        session_id=session_id,
+                                        is_final=token_is_final,
+                                        text=token_text,
+                                        confidence=token_confidence,
+                                        timestamp=datetime.now(),
+                                        processing_time_ms=data.get("final_audio_proc_ms", 0)
+                                    )
+                                    
+                                    await results_queue.put(streaming_result)
+                                    
+                                elif isinstance(token, str):
+                                    # Handle string tokens
+                                    streaming_result = StreamingResult(
+                                        session_id=session_id,
+                                        is_final=False,  # String tokens are usually interim
+                                        text=token,
+                                        confidence=0.0,
+                                        timestamp=datetime.now(),
+                                        processing_time_ms=data.get("final_audio_proc_ms", 0)
+                                    )
+                                    
+                                    await results_queue.put(streaming_result)
+                            
+                            # Also send complete utterance result for backward compatibility
                             text_parts = []
                             for token in tokens:
                                 if isinstance(token, dict) and "text" in token:
@@ -586,15 +625,7 @@ class SonioxSTTProvider(STTProvider):
                                     text_parts.append(token)
                             
                             if text_parts:
-                                text = "".join(text_parts)
-                                
-                                # Extract language from tokens
-                                detected_language = "unknown"
-                                if tokens:
-                                    for token in tokens:
-                                        if isinstance(token, dict) and "language" in token:
-                                            detected_language = token["language"]
-                                            break
+                                full_text = "".join(text_parts)
                                 
                                 # Calculate average confidence
                                 confidences = []
@@ -611,30 +642,17 @@ class SonioxSTTProvider(STTProvider):
                                     if isinstance(token, dict)
                                 )
                                 
-                                # Create transcription result
-                                result = TranscriptionResult(
-                                    text=text,
-                                    language_detected=detected_language,
-                                    confidence=avg_confidence,
-                                    is_final=is_final,
-                                    tokens=tokens,
-                                    metadata={
-                                        "processing_time_ms": data.get("final_audio_proc_ms", 0),
-                                        "total_audio_proc_ms": data.get("total_audio_proc_ms", 0)
-                                    }
-                                )
-                                
-                                # Create streaming result - match base interface
-                                streaming_result = StreamingResult(
+                                # Send complete utterance as a separate result (for backward compatibility)
+                                complete_result = StreamingResult(
                                     session_id=session_id,
                                     is_final=is_final,
-                                    text=text,
+                                    text=full_text,
                                     confidence=avg_confidence,
                                     timestamp=datetime.now(),
                                     processing_time_ms=data.get("final_audio_proc_ms", 0)
                                 )
                                 
-                                await results_queue.put(streaming_result)
+                                await results_queue.put(complete_result)
                                 
                     elif "error" in data:
                         error_msg = data.get("error", "Unknown error")
