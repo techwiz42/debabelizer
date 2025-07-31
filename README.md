@@ -5,7 +5,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Debabelizer is a powerful, universal voice processing library that provides a unified interface for speech-to-text (STT) and text-to-speech (TTS) operations across multiple cloud providers and local engines. Break down language barriers with support for 100+ languages and dialects.
+Debabelizer is a voice processing library that provides a unified interface for speech-to-text (STT) and text-to-speech (TTS) operations across multiple cloud providers and local engines. Break down language barriers with support for 100+ languages and dialects.
 
 ## 🌟 Features
 
