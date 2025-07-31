@@ -59,6 +59,14 @@ class DebabelizerConfig:
                 "tts_voice": os.getenv("OPENAI_TTS_VOICE", "alloy"),
             },
             
+            # OpenAI Whisper API (uses same key as OpenAI)
+            "openai_whisper": {
+                "api_key": os.getenv("OPENAI_API_KEY"),
+                "model": os.getenv("OPENAI_WHISPER_MODEL", "whisper-1"),
+                "temperature": float(os.getenv("OPENAI_WHISPER_TEMPERATURE", "0.0")),
+                "response_format": os.getenv("OPENAI_WHISPER_RESPONSE_FORMAT", "json"),
+            },
+            
             # Google Cloud
             "google": {
                 "credentials_path": os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -161,7 +169,7 @@ class DebabelizerConfig:
         tts_providers = []
         
         # Define provider types
-        stt_provider_names = ["soniox", "deepgram", "openai", "azure", "google", "whisper"]
+        stt_provider_names = ["soniox", "deepgram", "openai", "openai_whisper", "azure", "google", "whisper"]
         tts_provider_names = ["elevenlabs", "azure", "openai", "google"]
         
         for provider in stt_provider_names:

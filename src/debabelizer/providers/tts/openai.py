@@ -139,7 +139,7 @@ class OpenAITTSProvider(TTSProvider):
         voice: Optional[Voice] = None,
         voice_id: Optional[str] = None,
         audio_format: Optional[AudioFormat] = None,
-        sample_rate: int = 22050,
+        sample_rate: int = 24000,  # OpenAI's actual output sample rate
         **kwargs
     ) -> SynthesisResult:
         """Synthesize speech from text"""
@@ -170,6 +170,17 @@ class OpenAITTSProvider(TTSProvider):
         try:
             # Dynamic import to avoid requiring openai if not used
             from openai import AsyncOpenAI
+            import openai
+            
+            # Check OpenAI library version
+            if hasattr(openai, '__version__'):
+                version_parts = openai.__version__.split('.')
+                major_version = int(version_parts[0]) if version_parts[0].isdigit() else 0
+                if major_version < 1:
+                    raise ProviderError(
+                        f"OpenAI library version {openai.__version__} is too old. Please upgrade to >= 1.0.0",
+                        "openai"
+                    )
             
             # Initialize client
             client = AsyncOpenAI(api_key=self.api_key)
@@ -193,16 +204,35 @@ class OpenAITTSProvider(TTSProvider):
                 language="en"
             )
             
-            # Estimate duration (rough approximation based on text length and speed)
-            # Average speaking rate: ~150 words per minute
+            # Estimate duration based on actual synthesis result size and format
+            # This is more accurate than word-based estimation
             words = len(text.split())
             speed_factor = kwargs.get("speed", 1.0)
-            duration_seconds = (words / 150) * 60 / speed_factor
+            
+            # Better duration estimation based on audio format and typical OpenAI output
+            if output_format == "mp3":
+                # MP3 compression varies, but estimate based on typical bitrate (~64kbps for speech)
+                estimated_bitrate = 64000  # bits per second
+                duration_seconds = (len(audio_data) * 8) / estimated_bitrate
+            elif output_format in ["wav", "pcm"]:
+                # Uncompressed: bytes = sample_rate * channels * bytes_per_sample * duration
+                # OpenAI typically outputs 24kHz, mono, 16-bit
+                bytes_per_second = 24000 * 1 * 2  # 24kHz * mono * 2 bytes per sample
+                duration_seconds = len(audio_data) / bytes_per_second
+            else:
+                # Fallback to word-based estimation for other formats
+                duration_seconds = (words / 150) * 60 / speed_factor
+                
+            # Apply speed factor to estimated duration
+            duration_seconds = duration_seconds / speed_factor
+            
+            # OpenAI TTS always outputs at 24kHz regardless of requested sample_rate
+            actual_sample_rate = 24000
             
             return SynthesisResult(
                 audio_data=audio_data,
                 format=output_format,
-                sample_rate=sample_rate,
+                sample_rate=actual_sample_rate,
                 duration=duration_seconds,
                 size_bytes=len(audio_data),
                 voice_used=used_voice,
@@ -213,7 +243,10 @@ class OpenAITTSProvider(TTSProvider):
                     "speed": kwargs.get("speed", 1.0),
                     "character_count": len(text),
                     "word_count": words,
-                    "response_format": output_format
+                    "response_format": output_format,
+                    "requested_sample_rate": sample_rate,
+                    "actual_sample_rate": actual_sample_rate,
+                    "duration_estimation_method": "audio_size_based" if output_format in ["mp3", "wav", "pcm"] else "word_based"
                 }
             )
             
@@ -239,10 +272,10 @@ class OpenAITTSProvider(TTSProvider):
         voice: Optional[Voice] = None,
         voice_id: Optional[str] = None,
         audio_format: Optional[AudioFormat] = None,
-        sample_rate: int = 22050,
+        sample_rate: int = 24000,  # OpenAI's actual output sample rate
         **kwargs
     ) -> AsyncGenerator[bytes, None]:
-        """Stream synthesis results in real-time"""
+        """Stream synthesis results (simulated streaming - OpenAI doesn't support true streaming yet)"""
         
         # Validate text length
         self._validate_text_length(text)
@@ -283,17 +316,31 @@ class OpenAITTSProvider(TTSProvider):
             # Stream the response in chunks
             chunk_size = kwargs.get("chunk_size", 1024)
             
-            # For OpenAI, we get the full response and then chunk it
-            # This is because OpenAI doesn't provide true streaming TTS yet
+            # IMPORTANT: OpenAI doesn't provide true streaming TTS yet
+            # This implementation downloads the full audio first, then simulates streaming
+            # This provides the interface but not the latency benefits of true streaming
+            logger.warning("OpenAI TTS doesn't support true streaming. Simulating with chunked delivery.")
+            
             audio_data = response.content
             
-            # Yield chunks
+            # Calculate delay based on audio duration for more realistic streaming
+            # Estimate total duration for pacing
+            words = len(text.split())
+            speed_factor = kwargs.get("speed", 1.0)
+            estimated_duration = (words / 150) * 60 / speed_factor  # rough estimate
+            
+            # Pace chunks to approximate real-time playback
+            total_chunks = (len(audio_data) + chunk_size - 1) // chunk_size
+            delay_per_chunk = estimated_duration / total_chunks if total_chunks > 0 else 0.01
+            
+            # Yield chunks with realistic timing
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i:i + chunk_size]
                 yield chunk
                 
-                # Small delay to simulate streaming
-                await asyncio.sleep(0.01)
+                # Delay to simulate real-time streaming
+                if i + chunk_size < len(audio_data):  # Don't delay after last chunk
+                    await asyncio.sleep(min(delay_per_chunk, 0.1))  # Cap delay at 100ms
                 
         except ImportError:
             raise ProviderError(

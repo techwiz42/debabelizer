@@ -105,7 +105,7 @@ class VoiceProcessor:
     
     def _validate_stt_provider_config(self, provider_name: str) -> None:
         """Validate that STT provider is properly configured"""
-        valid_providers = ["soniox", "deepgram", "openai", "azure", "google", "whisper"]
+        valid_providers = ["soniox", "deepgram", "openai", "openai_whisper", "azure", "google", "whisper"]
         
         if provider_name not in valid_providers:
             raise ProviderError(f"STT provider '{provider_name}' is not configured or not supported", provider_name)
@@ -204,6 +204,13 @@ class VoiceProcessor:
             except ImportError as e:
                 raise ProviderError(f"Whisper STT provider not available: {e}", provider_name)
         
+        if provider_name == "openai_whisper":
+            try:
+                from ..providers.stt.openai_whisper import OpenAIWhisperSTTProvider
+                provider_classes["openai_whisper"] = OpenAIWhisperSTTProvider
+            except ImportError as e:
+                raise ProviderError(f"OpenAI Whisper API provider not available: {e}", provider_name)
+        
         if provider_name not in provider_classes:
             raise ProviderError(f"Unknown STT provider: {provider_name}")
             
@@ -236,6 +243,18 @@ class VoiceProcessor:
         # Special handling for Whisper (no API key required - local processing)
         if provider_name == "whisper":
             return provider_class(**provider_config)
+        
+        # Special handling for OpenAI Whisper (uses OpenAI API key)
+        if provider_name == "openai_whisper":
+            api_key = self.config.get_provider_config(provider_name, "api_key")
+            if not api_key:
+                # Fallback to standard openai API key if openai_whisper key not found
+                api_key = self.config.get_provider_config("openai", "api_key") or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ProviderError(f"OpenAI API key not configured for {provider_name}")
+            # Remove api_key from provider_config to avoid duplicate parameter error
+            provider_config_clean = {k: v for k, v in provider_config.items() if k != "api_key"}
+            return provider_class(api_key, **provider_config_clean)
         
         # Standard API key providers
         api_key = self.config.get_provider_config(provider_name, "api_key")
@@ -482,6 +501,59 @@ class VoiceProcessor:
             await provider.stop_streaming(session_id)
         self.session_manager.end_session(session_id)
         
+    async def transcribe_chunk(
+        self,
+        audio_data: bytes,
+        audio_format: str = "webm",
+        sample_rate: int = 48000,
+        language: Optional[str] = None,
+        **kwargs
+    ) -> TranscriptionResult:
+        """
+        Transcribe audio chunk using file API (fake streaming approach).
+        This method is optimized for processing buffered audio chunks from browsers.
+        
+        Args:
+            audio_data: Raw audio bytes
+            audio_format: Audio format (defaults to webm for browser compatibility)
+            sample_rate: Sample rate in Hz (defaults to 48000 for WebM)
+            language: Expected language
+            **kwargs: Provider-specific options
+            
+        Returns:
+            TranscriptionResult
+        """
+        if not self._stt_provider:
+            await self._auto_select_stt_provider()
+        
+        # Use _get_stt_provider for potential test mocking
+        provider = self._get_stt_provider()
+        if not provider:
+            raise ProviderError("No STT provider available")
+            
+        # Check if provider supports chunk transcription
+        if not hasattr(provider, 'transcribe_chunk'):
+            # Fallback to regular transcribe_audio if chunk method not available
+            logger.warning(f"Provider {provider.name} doesn't support transcribe_chunk, falling back to transcribe_audio")
+            return await self.transcribe_audio(
+                audio_data, audio_format, sample_rate, language, **kwargs
+            )
+            
+        logger.info(f"Transcribing {len(audio_data)} bytes of {audio_format} chunk with {provider.name}")
+        
+        start_time = datetime.now()
+        result = await provider.transcribe_chunk(
+            audio_data, audio_format, sample_rate, language, **kwargs
+        )
+        
+        # Update usage stats
+        duration = (datetime.now() - start_time).total_seconds()
+        self.usage_stats["stt_requests"] += 1
+        self.usage_stats["stt_duration"] += duration
+        self.usage_stats["cost_estimate"] += provider.get_cost_estimate(duration)
+        
+        return result
+        
     # TTS Methods
     
     async def synthesize(
@@ -633,10 +705,10 @@ class VoiceProcessor:
         """Select best STT provider based on optimization strategy"""
         # Define provider rankings for different strategies
         provider_rankings = {
-            "cost": ["soniox", "deepgram", "azure", "google", "openai"],  # Cheapest first
-            "latency": ["soniox", "deepgram", "google", "azure", "openai"],  # Fastest first
-            "quality": ["openai", "google", "deepgram", "soniox", "azure"],  # Best quality first
-            "balanced": ["deepgram", "soniox", "google", "openai", "azure"]  # Balanced approach
+            "cost": ["soniox", "deepgram", "azure", "google", "openai_whisper", "openai"],  # Cheapest first
+            "latency": ["soniox", "deepgram", "google", "azure", "openai_whisper", "openai"],  # Fastest first  
+            "quality": ["openai_whisper", "openai", "google", "deepgram", "soniox", "azure"],  # Best quality first
+            "balanced": ["deepgram", "soniox", "openai_whisper", "google", "openai", "azure"]  # Balanced approach
         }
         
         ranking = provider_rankings.get(strategy, provider_rankings["balanced"])

@@ -17,6 +17,8 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 from datetime import datetime
 import uuid
 import json
+import queue
+import threading
 
 import azure.cognitiveservices.speech as speechsdk
 from azure.cognitiveservices.speech import (
@@ -442,7 +444,7 @@ class AzureSTTProvider(STTProvider):
             logger.error(f"Transcription failed: {e}")
             raise ProviderError(f"Transcription failed: {e}", self.name)
     
-    async def start_streaming(
+    async def start_streaming_transcription(
         self,
         audio_format: str = "wav",
         sample_rate: int = 16000,
@@ -486,20 +488,24 @@ class AzureSTTProvider(STTProvider):
                 audio_config=audio_config
             )
             
-            # Create session
+            # Create session with thread-safe communication
             result_queue = asyncio.Queue()
+            sync_result_queue = queue.Queue()  # Thread-safe queue for sync handlers
             
-            # Set up event handlers
+            # Set up event handlers (sync functions - no async operations!)
             def handle_recognizing(evt):
                 if evt.result.text:
-                    asyncio.create_task(result_queue.put(
-                        StreamingResult(
-                            session_id=session_id,
-                            is_final=False,
-                            text=evt.result.text,
-                            confidence=0.0  # No confidence for interim results
+                    try:
+                        sync_result_queue.put_nowait(
+                            StreamingResult(
+                                session_id=session_id,
+                                is_final=False,
+                                text=evt.result.text,
+                                confidence=0.0  # No confidence for interim results
+                            )
                         )
-                    ))
+                    except queue.Full:
+                        logger.warning(f"Result queue full for session {session_id}")
             
             def handle_recognized(evt):
                 if evt.result.reason == ResultReason.RecognizedSpeech:
@@ -514,29 +520,57 @@ class AzureSTTProvider(STTProvider):
                         except:
                             pass
                     
-                    asyncio.create_task(result_queue.put(
-                        StreamingResult(
-                            session_id=session_id,
-                            is_final=True,
-                            text=evt.result.text,
-                            confidence=confidence
+                    try:
+                        sync_result_queue.put_nowait(
+                            StreamingResult(
+                                session_id=session_id,
+                                is_final=True,
+                                text=evt.result.text,
+                                confidence=confidence
+                            )
                         )
-                    ))
+                    except queue.Full:
+                        logger.warning(f"Result queue full for session {session_id}")
+            
+            def handle_canceled(evt):
+                if evt.result.reason == CancellationReason.Error:
+                    logger.error(f"Azure recognition canceled: {evt.result.error_details}")
+                    try:
+                        sync_result_queue.put_nowait(
+                            StreamingResult(
+                                session_id=session_id,
+                                is_final=True,
+                                text="",
+                                confidence=0.0,
+                                metadata={"error": evt.result.error_details}
+                            )
+                        )
+                    except queue.Full:
+                        pass
             
             # Connect handlers
             recognizer.recognizing.connect(handle_recognizing)
             recognizer.recognized.connect(handle_recognized)
+            recognizer.canceled.connect(handle_canceled)
             
             # Start continuous recognition
             recognizer.start_continuous_recognition()
             
-            # Store session
+            # Store session with result transfer task
             self.streaming_sessions[session_id] = {
                 "recognizer": recognizer,
                 "stream": stream,
                 "result_queue": result_queue,
-                "active": True
+                "sync_result_queue": sync_result_queue,
+                "active": True,
+                "transfer_task": None
             }
+            
+            # Start task to transfer results from sync queue to async queue
+            session = self.streaming_sessions[session_id]
+            session["transfer_task"] = asyncio.create_task(
+                self._transfer_results(session_id)
+            )
             
             logger.info(f"Started Azure streaming session: {session_id}")
             return session_id
@@ -581,7 +615,7 @@ class AzureSTTProvider(STTProvider):
                 if not session["active"]:
                     break
     
-    async def stop_streaming(self, session_id: str) -> None:
+    async def stop_streaming_transcription(self, session_id: str) -> None:
         """Stop streaming transcription session"""
         if session_id not in self.streaming_sessions:
             return
@@ -590,15 +624,83 @@ class AzureSTTProvider(STTProvider):
         session["active"] = False
         
         try:
-            # Close stream and stop recognition
-            session["stream"].close()
+            # Stop recognition first
             session["recognizer"].stop_continuous_recognition()
+            
+            # Wait a moment for final results
+            await asyncio.sleep(0.1)
+            
+            # Close stream
+            session["stream"].close()
+            
+            # Cancel transfer task
+            if session["transfer_task"] and not session["transfer_task"].done():
+                session["transfer_task"].cancel()
+                try:
+                    await session["transfer_task"]
+                except asyncio.CancelledError:
+                    pass
+                    
         except Exception as e:
-            logger.warning(f"Error stopping session: {e}")
+            logger.warning(f"Error stopping Azure session: {e}")
         
         # Clean up
         del self.streaming_sessions[session_id]
         logger.info(f"Stopped Azure streaming session: {session_id}")
+    
+    # Backward compatibility aliases
+    async def start_streaming(
+        self,
+        audio_format: str = "wav",
+        sample_rate: int = 16000,
+        language: Optional[str] = None,
+        language_hints: Optional[List[str]] = None,
+        **kwargs
+    ) -> str:
+        """Backward compatibility alias for start_streaming_transcription"""
+        return await self.start_streaming_transcription(
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+            language=language,
+            language_hints=language_hints,
+            **kwargs
+        )
+    
+    async def stop_streaming(self, session_id: str) -> None:
+        """Backward compatibility alias for stop_streaming_transcription"""
+        return await self.stop_streaming_transcription(session_id)
+    
+    async def _transfer_results(self, session_id: str) -> None:
+        """Transfer results from sync queue to async queue"""
+        if session_id not in self.streaming_sessions:
+            return
+            
+        session = self.streaming_sessions[session_id]
+        sync_queue = session["sync_result_queue"]
+        async_queue = session["result_queue"]
+        
+        while session["active"]:
+            try:
+                # Get result from sync queue with timeout
+                result = sync_queue.get(timeout=0.1)
+                
+                # Put in async queue
+                await async_queue.put(result)
+                
+            except queue.Empty:
+                # Continue if no results available
+                continue
+            except Exception as e:
+                logger.error(f"Error transferring result for session {session_id}: {e}")
+                break
+        
+        # Transfer any remaining results
+        while not sync_queue.empty():
+            try:
+                result = sync_queue.get_nowait()
+                await async_queue.put(result)
+            except (queue.Empty, Exception):
+                break
     
     def _map_language_to_azure(self, language: str) -> str:
         """Map standard language code to Azure format"""
@@ -657,4 +759,4 @@ class AzureSTTProvider(STTProvider):
         # Stop all streaming sessions
         session_ids = list(self.streaming_sessions.keys())
         for session_id in session_ids:
-            await self.stop_streaming(session_id)
+            await self.stop_streaming_transcription(session_id)

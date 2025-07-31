@@ -30,3 +30,9 @@ try:
     __all__.append("WhisperSTTProvider")
 except ImportError:
     pass
+
+try:
+    from .openai_whisper import OpenAIWhisperSTTProvider
+    __all__.append("OpenAIWhisperSTTProvider")
+except ImportError:
+    pass

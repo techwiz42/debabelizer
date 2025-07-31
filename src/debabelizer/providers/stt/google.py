@@ -16,6 +16,10 @@ import logging
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from datetime import datetime
 import json
+import queue
+import threading
+import concurrent.futures
+import uuid
 
 from google.cloud import speech_v1
 from google.cloud.speech_v1 import enums
@@ -363,7 +367,7 @@ class GoogleSTTProvider(STTProvider):
             logger.error(f"Transcription failed: {e}")
             raise ProviderError(f"Transcription failed: {e}", self.name)
     
-    async def start_streaming(
+    async def start_streaming_transcription(
         self,
         audio_format: str = "wav",
         sample_rate: int = 16000,
@@ -372,7 +376,6 @@ class GoogleSTTProvider(STTProvider):
         **kwargs
     ) -> str:
         """Start a streaming transcription session"""
-        import uuid
         session_id = str(uuid.uuid4())
         
         # Build streaming config
@@ -385,13 +388,18 @@ class GoogleSTTProvider(STTProvider):
             **kwargs
         )
         
-        # Create session
+        # Create session with thread-safe communication
+        import queue
+        import threading
+        
         self.streaming_sessions[session_id] = {
             "config": config,
             "audio_queue": asyncio.Queue(),
             "result_queue": asyncio.Queue(),
+            "sync_audio_queue": queue.Queue(),  # Thread-safe queue for sync generator
             "active": True,
-            "task": None
+            "task": None,
+            "stop_event": threading.Event()
         }
         
         # Start streaming task
@@ -403,6 +411,24 @@ class GoogleSTTProvider(STTProvider):
         logger.info(f"Started Google streaming session: {session_id}")
         return session_id
     
+    # Backward compatibility alias
+    async def start_streaming(
+        self,
+        audio_format: str = "wav",
+        sample_rate: int = 16000,
+        language: Optional[str] = None,
+        language_hints: Optional[List[str]] = None,
+        **kwargs
+    ) -> str:
+        """Backward compatibility alias for start_streaming_transcription"""
+        return await self.start_streaming_transcription(
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+            language=language,
+            language_hints=language_hints,
+            **kwargs
+        )
+    
     async def stream_audio(self, session_id: str, audio_chunk: bytes) -> None:
         """Send audio chunk to streaming session"""
         if session_id not in self.streaming_sessions:
@@ -412,7 +438,12 @@ class GoogleSTTProvider(STTProvider):
         if not session["active"]:
             raise ProviderError(f"Session {session_id} is not active", self.name)
         
+        # Put in both async queue (for async handling) and sync queue (for generator)
         await session["audio_queue"].put(audio_chunk)
+        try:
+            session["sync_audio_queue"].put_nowait(audio_chunk)
+        except queue.Full:
+            logger.warning(f"Sync audio queue full for session {session_id}")
     
     async def get_streaming_results(
         self, 
@@ -435,13 +466,14 @@ class GoogleSTTProvider(STTProvider):
                 if not session["active"]:
                     break
     
-    async def stop_streaming(self, session_id: str) -> None:
+    async def stop_streaming_transcription(self, session_id: str) -> None:
         """Stop streaming transcription session"""
         if session_id not in self.streaming_sessions:
             return
         
         session = self.streaming_sessions[session_id]
         session["active"] = False
+        session["stop_event"].set()  # Signal generator to stop
         
         # Cancel streaming task
         if session["task"] and not session["task"].done():
@@ -454,6 +486,11 @@ class GoogleSTTProvider(STTProvider):
         # Clean up
         del self.streaming_sessions[session_id]
         logger.info(f"Stopped Google streaming session: {session_id}")
+    
+    # Backward compatibility alias
+    async def stop_streaming(self, session_id: str) -> None:
+        """Backward compatibility alias for stop_streaming_transcription"""
+        return await self.stop_streaming_transcription(session_id)
     
     def _build_recognition_config(
         self,
@@ -528,12 +565,12 @@ class GoogleSTTProvider(STTProvider):
         return google_lang.split("-")[0]
     
     async def _streaming_recognize(self, session_id: str) -> None:
-        """Handle streaming recognition"""
+        """Handle streaming recognition with proper async/sync separation"""
         session = self.streaming_sessions[session_id]
         config = session["config"]
         
         try:
-            # Create request generator
+            # Create sync request generator that uses thread-safe queue
             def request_generator():
                 # First request with config
                 yield speech_v1.StreamingRecognizeRequest(
@@ -543,48 +580,105 @@ class GoogleSTTProvider(STTProvider):
                     )
                 )
                 
-                # Stream audio chunks
-                while session["active"]:
+                # Stream audio chunks using sync queue
+                while not session["stop_event"].is_set():
                     try:
-                        # Non-blocking get with timeout
-                        audio_chunk = asyncio.run_coroutine_threadsafe(
-                            asyncio.wait_for(session["audio_queue"].get(), timeout=0.1),
-                            asyncio.get_event_loop()
-                        ).result()
-                        
+                        # Non-blocking get with timeout from sync queue
+                        audio_chunk = session["sync_audio_queue"].get(timeout=0.1)
                         yield speech_v1.StreamingRecognizeRequest(
                             audio_content=audio_chunk
                         )
-                    except:
+                    except queue.Empty:
                         if not session["active"]:
                             break
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error in request generator: {e}")
+                        break
             
-            # Perform streaming recognition
-            responses = self.client.streaming_recognize(request_generator())
+            # Start streaming in separate thread and process responses asynchronously
+            response_queue = queue.Queue()
+            error_queue = queue.Queue()
             
-            # Process responses
-            for response in responses:
-                if not session["active"]:
+            def streaming_thread():
+                """Thread to handle Google's streaming API"""
+                try:
+                    responses = self.client.streaming_recognize(request_generator())
+                    for response in responses:
+                        if not session["active"]:
+                            break
+                        response_queue.put(response)
+                except google_exceptions.GoogleAPIError as e:
+                    error_queue.put(ProviderError(f"Google API error: {e}", self.name))
+                except Exception as e:
+                    error_queue.put(e)
+                finally:
+                    response_queue.put(None)  # Sentinel to indicate end of stream
+            
+            # Start streaming thread
+            thread = threading.Thread(target=streaming_thread, daemon=True)
+            thread.start()
+            
+            # Process responses from thread
+            while session["active"]:
+                try:
+                    # Check for errors first
+                    if not error_queue.empty():
+                        error = error_queue.get_nowait()
+                        raise error
+                    
+                    # Get response with timeout
+                    response = response_queue.get(timeout=0.1)
+                    
+                    # None is sentinel for end of stream
+                    if response is None:
+                        break
+                    
+                    # Process response
+                    for result in response.results:
+                        if result.alternatives:
+                            alternative = result.alternatives[0]
+                            
+                            # Create streaming result
+                            streaming_result = StreamingResult(
+                                session_id=session_id,
+                                is_final=result.is_final,
+                                text=alternative.transcript,
+                                confidence=alternative.confidence if hasattr(alternative, 'confidence') else 0.0,
+                                metadata={
+                                    "result_end_time": result.result_end_time.total_seconds() if hasattr(result, 'result_end_time') and result.result_end_time else None,
+                                    "stability": result.stability if hasattr(result, 'stability') else None
+                                }
+                            )
+                            
+                            # Add to result queue
+                            await session["result_queue"].put(streaming_result)
+                            
+                except queue.Empty:
+                    # Continue if no response available
+                    continue
+                except Exception as e:
+                    logger.error(f"Error processing streaming response: {e}")
                     break
-                
-                for result in response.results:
-                    if result.alternatives:
-                        alternative = result.alternatives[0]
+            
+            # Wait for thread to finish
+            if thread.is_alive():
+                thread.join(timeout=1.0)
                         
-                        # Create streaming result
-                        streaming_result = StreamingResult(
-                            session_id=session_id,
-                            is_final=result.is_final,
-                            text=alternative.transcript,
-                            confidence=alternative.confidence if hasattr(alternative, 'confidence') else 0.0
-                        )
-                        
-                        # Add to result queue
-                        await session["result_queue"].put(streaming_result)
-                        
+        except google_exceptions.GoogleAPIError as e:
+            logger.error(f"Google API streaming error: {e}")
+            # Put specific API error result
+            error_result = StreamingResult(
+                session_id=session_id,
+                is_final=True,
+                text="",
+                confidence=0.0,
+                metadata={"error": f"Google API error: {e}"}
+            )
+            await session["result_queue"].put(error_result)
         except Exception as e:
             logger.error(f"Streaming recognition error: {e}")
-            # Put error result
+            # Put general error result
             error_result = StreamingResult(
                 session_id=session_id,
                 is_final=True,

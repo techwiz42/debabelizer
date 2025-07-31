@@ -4,30 +4,30 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-105%2F120%20passing-green.svg)](#testing)
 
-Debabelizer is a powerful, universal voice processing library that provides a unified interface for speech-to-text (STT) and text-to-speech (TTS) operations across multiple cloud providers and local engines. Break down language barriers with support for 400+ languages and dialects.
+Debabelizer is a powerful, universal voice processing library that provides a unified interface for speech-to-text (STT) and text-to-speech (TTS) operations across multiple cloud providers and local engines. Break down language barriers with support for 100+ languages and dialects.
 
 ## 🌟 Features
 
 ### 🎯 **Pluggable Provider Support**
-- **5 STT Providers**: Soniox, Deepgram, Google Cloud, Azure, OpenAI Whisper
+- **6 STT Providers**: Soniox, Deepgram, Google Cloud, Azure, OpenAI Whisper (local), OpenAI Whisper (API)
 - **4 TTS Providers**: ElevenLabs, OpenAI, Google Cloud, Azure
 - **Unified API**: Switch providers without changing code
-- **Smart Fallbacks**: Automatic provider selection based on optimization strategy
+- **Provider-specific optimizations**: Each provider uses its optimal streaming/processing approach
 
 ### 🌍 **Comprehensive Language Support**
-- **40+ languages and dialects** across all providers
+- **100+ languages and dialects** across all providers
 - **Automatic language detection** 
 - **Multi-language processing** in single workflows
 - **Custom language hints** for improved accuracy
 
 ### ⚡ **Advanced Processing**
-- **Real-time streaming** transcription and synthesis
-- **Batch processing** for large files
+- **Real-time streaming** transcription (Soniox, Deepgram with true WebSocket streaming)
+- **Chunk-based transcription** for reliable web application audio processing
+- **File-based transcription** for batch processing
 - **Word-level timestamps** and confidence scores
-- **Speaker diarization** and voice identification
-- **Custom voice training** and cloning
+- **Speaker diarization** and voice identification (provider-dependent)
+- **Custom voice training** and cloning (ElevenLabs)
 
 ### 🏠 **Local & Cloud Options**
 - **OpenAI Whisper**: Complete offline processing (FREE)
@@ -58,7 +58,7 @@ pip install debabelizer[google]      # Google Cloud STT & TTS
 pip install debabelizer[azure]       # Azure STT & TTS
 pip install debabelizer[whisper]     # OpenAI Whisper STT (local)
 pip install debabelizer[elevenlabs]  # ElevenLabs TTS
-pip install debabelizer[openai]      # OpenAI TTS
+pip install debabelizer[openai]      # OpenAI TTS & Whisper API
 
 # All providers
 pip install debabelizer[all]
@@ -72,38 +72,6 @@ pip install debabelizer[dev]
 git clone https://github.com/your-org/debabelizer.git
 cd debabelizer
 pip install -e .[dev]
-```
-
-## 🔨 Building from Source
-
-### Prerequisites
-```bash
-# Required build tools
-pip install build twine setuptools wheel
-
-# For development
-pip install -e .[dev]
-```
-
-### Build Distribution
-```bash
-# Clean previous builds
-rm -rf build/ dist/ *.egg-info/
-
-# Build source and wheel distributions
-python -m build
-
-# Verify the build
-twine check dist/*
-```
-
-### Local Installation from Build
-```bash
-# Install from local wheel
-pip install dist/debabelizer-*.whl
-
-# Or install from source distribution
-pip install dist/debabelizer-*.tar.gz
 ```
 
 ## 🚀 Quick Start
@@ -186,31 +154,37 @@ async def local_transcription():
 asyncio.run(local_transcription())
 ```
 
-### Real-time Streaming
+### Real-time Streaming (Provider-Specific)
 ```python
 import asyncio
 from debabelizer import VoiceProcessor, DebabelizerConfig
 
 async def streaming_transcription():
+    # Note: True streaming varies by provider
+    # Soniox: True real-time WebSocket streaming
+    # Deepgram: True real-time WebSocket streaming  
+    # Google/Azure: Session-based streaming with optimizations
+    
     config = DebabelizerConfig({
-        "deepgram": {"api_key": "your_key"}
+        "soniox": {"api_key": "your_key"}  # Best for true streaming
     })
     
-    processor = VoiceProcessor(stt_provider="deepgram", config=config)
+    processor = VoiceProcessor(stt_provider="soniox", config=config)
     
     # Start streaming session
     session_id = await processor.start_streaming_transcription(
-        audio_format="wav",
-        sample_rate=16000
+        audio_format="pcm",  # Raw PCM preferred for streaming
+        sample_rate=16000,
+        language="en"
     )
     
-    # Stream audio chunks
+    # Stream audio chunks (typically 16ms - 100ms chunks)
     with open("audio.wav", "rb") as f:
-        chunk_size = 1024
+        chunk_size = 1024  # Small chunks for real-time
         while chunk := f.read(chunk_size):
             await processor.stream_audio(session_id, chunk)
     
-    # Get results
+    # Get results as they arrive
     async for result in processor.get_streaming_results(session_id):
         if result.is_final:
             print(f"Final: {result.text}")
@@ -222,6 +196,44 @@ async def streaming_transcription():
 asyncio.run(streaming_transcription())
 ```
 
+### Chunk-Based Transcription (Recommended for Web Apps)
+```python
+import asyncio
+from debabelizer import VoiceProcessor, DebabelizerConfig
+
+async def chunk_transcription():
+    """
+    Process audio chunks using file API - more reliable than streaming.
+    Ideal for web applications with buffered audio from browsers.
+    """
+    config = DebabelizerConfig({
+        "deepgram": {"api_key": "your_key"}
+    })
+    
+    processor = VoiceProcessor(stt_provider="deepgram", config=config)
+    
+    # Process buffered audio chunks (e.g., from WebSocket/MediaRecorder)
+    # This approach is more reliable than streaming for web applications
+    
+    # Example: Process 2-second audio buffer from browser
+    with open("audio_chunk.webm", "rb") as f:
+        chunk_data = f.read()  # WebM/Opus from MediaRecorder
+    
+    # Process chunk using file API (not streaming)
+    result = await processor.transcribe_audio(
+        audio_data=chunk_data,
+        audio_format="webm",     # Browser WebM/Opus format
+        sample_rate=48000,       # Browser standard
+        language="en"
+    )
+    
+    print(f"Chunk result: {result.text}")
+    print(f"Confidence: {result.confidence}")
+    print(f"Language: {result.language_detected}")
+
+asyncio.run(chunk_transcription())
+```
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -231,8 +243,13 @@ Create a `.env` file:
 DEEPGRAM_API_KEY=your_deepgram_key
 ELEVENLABS_API_KEY=your_elevenlabs_key
 OPENAI_API_KEY=your_openai_key
+SONIOX_API_KEY=your_soniox_key
+
+# Azure (requires key + region)
 AZURE_SPEECH_KEY=your_azure_key
 AZURE_SPEECH_REGION=eastus
+
+# Google Cloud (requires service account JSON)
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/google-credentials.json
 
 # Preferences
@@ -241,165 +258,215 @@ DEBABELIZER_TTS_PROVIDER=elevenlabs
 DEBABELIZER_OPTIMIZE_FOR=quality  # cost, latency, quality, balanced
 ```
 
-### Programmatic Configuration
-```python
-from debabelizer import DebabelizerConfig, VoiceProcessor
+### Authentication Requirements by Provider
 
-# Method 1: Direct configuration
-config = DebabelizerConfig({
+#### Google Cloud STT/TTS
+**Requires**: Service account JSON file or Application Default Credentials
+```bash
+# Option 1: Service account file
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+
+# Option 2: Use gcloud CLI (for development)
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+#### Azure STT/TTS
+**Requires**: API key + region
+```bash
+AZURE_SPEECH_KEY=your_api_key_here
+AZURE_SPEECH_REGION=eastus  # or your preferred region
+```
+
+#### OpenAI (TTS & Whisper API)
+**Requires**: OpenAI API key
+```bash
+OPENAI_API_KEY=your_openai_api_key
+```
+
+#### ElevenLabs TTS
+**Requires**: ElevenLabs API key
+```bash
+ELEVENLABS_API_KEY=your_elevenlabs_key
+```
+
+#### Deepgram STT
+**Requires**: Deepgram API key
+```bash
+DEEPGRAM_API_KEY=your_deepgram_key
+```
+
+#### Soniox STT
+**Requires**: Soniox API key
+```bash
+SONIOX_API_KEY=your_soniox_key
+```
+
+#### OpenAI Whisper (Local)
+**Requires**: No API key (completely offline)
+- Automatically downloads models on first use
+- Supports GPU acceleration with CUDA/MPS
+
+## 🎯 Provider Comparison & Testing Status
+
+### Speech-to-Text (STT) Providers
+
+| Provider | Status | Streaming | Testing | Authentication | Best For |
+|----------|--------|-----------|---------|----------------|----------|
+| **Soniox** | ✅ **Verified** | True WebSocket streaming | ✅ **Tested & Fixed** | API Key | Real-time applications |
+| **Deepgram** | ✅ **Verified** | True WebSocket streaming | ✅ **Tested & Fixed** | API Key | High accuracy & speed |
+| **Google Cloud** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Needs Auth Setup** | Service Account JSON | Enterprise features |
+| **Azure** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Needs Auth Setup** | API Key + Region | Microsoft ecosystem |
+| **OpenAI Whisper (Local)** | ✅ **Verified** | File-based only | ✅ **Tested** | None (offline) | Cost-free processing |
+| **OpenAI Whisper (API)** | ✅ **Available** | File-based only | ⚠️ **Not tested** | OpenAI API Key | Cloud Whisper |
+
+### Text-to-Speech (TTS) Providers
+
+| Provider | Status | Streaming | Testing | Authentication | Best For |
+|----------|--------|-----------|---------|----------------|----------|
+| **ElevenLabs** | ✅ **Available** | Simulated streaming | ⚠️ **Not tested** | API Key | Voice cloning & quality |
+| **OpenAI** | ✅ **Verified** | Simulated streaming | ✅ **Tested & Fixed** | OpenAI API Key | Natural voices |
+| **Google Cloud** | ✅ **Available** | TBD | ⚠️ **Not tested** | Service Account JSON | Enterprise features |
+| **Azure** | ✅ **Available** | TBD | ⚠️ **Not tested** | API Key + Region | Microsoft ecosystem |
+
+### Key Testing Results
+
+#### ✅ **Fully Tested & Verified**
+- **OpenAI TTS**: All features working, issues fixed (sample rate accuracy, duration estimation, streaming transparency)
+- **Soniox STT**: Streaming implementation fixed (method names, session management)
+- **Deepgram STT**: True WebSocket streaming implemented and working
+
+#### ✅ **Code Issues Fixed (Ready for Testing)**
+- **Google Cloud STT**: Fixed critical async/sync mixing bugs in streaming implementation
+- **Azure STT**: Fixed critical async/sync mixing bugs in event handlers
+
+#### ⚠️ **Available but Needs Testing**
+- **ElevenLabs TTS**: Implementation exists but not tested
+- **Google Cloud TTS**: Implementation exists but not tested  
+- **Azure TTS**: Implementation exists but not tested
+- **OpenAI Whisper API**: Implementation exists but not tested
+
+## 🔧 Advanced Usage
+
+### Chunk vs Streaming Transcription
+
+**When to use File/Chunk Transcription (`transcribe_audio`):**
+- ✅ Web applications with browser audio (WebM/Opus from MediaRecorder)
+- ✅ Buffered audio processing (0.5-3 second chunks)
+- ✅ More reliable than streaming for web apps
+- ✅ Better error handling and debugging
+- ✅ Consistent results with file APIs
+- ✅ **Recommended approach for most applications**
+
+**When to use Streaming Transcription:**
+- ✅ True real-time applications (live phone calls, voice assistants)
+- ✅ Very low latency requirements (<200ms)
+- ✅ Continuous audio streams
+- ⚠️ More complex connection management
+- ⚠️ Requires handling interim results and reconnections
+- ⚠️ Provider-specific implementation differences
+
+```python
+async def compare_approaches():
+    config = DebabelizerConfig({"deepgram": {"api_key": "your_key"}})
+    processor = VoiceProcessor(stt_provider="deepgram", config=config)
+    
+    # Chunk approach (recommended for web apps)
+    with open("audio_chunk.webm", "rb") as f:
+        chunk_data = f.read()
+    
+    # This is the most reliable approach for web applications
+    chunk_result = await processor.transcribe_audio(
+        audio_data=chunk_data,
+        audio_format="webm",  # From browser MediaRecorder
+        sample_rate=48000,    # Browser standard
+        language="en"
+    )
+    print(f"Chunk: {chunk_result.text}")
+    
+    # Streaming approach (for specialized real-time applications)
+    session_id = await processor.start_streaming_transcription(
+        audio_format="pcm",   # Raw PCM preferred for streaming
+        sample_rate=16000,
+        language="en"
+    )
+    
+    # Stream in small chunks for real-time processing
+    chunk_size = 512  # Small chunks for low latency
+    with open("audio.wav", "rb") as f:
+        while chunk := f.read(chunk_size):
+            await processor.stream_audio(session_id, chunk)
+    
+    async for result in processor.get_streaming_results(session_id):
+        if result.is_final:
+            print(f"Stream: {result.text}")
+            break
+    
+    await processor.stop_streaming_transcription(session_id)
+```
+
+### Provider-Specific Optimizations
+
+```python
+# Soniox: Best for true real-time streaming
+soniox_config = DebabelizerConfig({
+    "soniox": {
+        "api_key": "your_key",
+        "model": "en_v2",
+        "include_profanity": False,
+        "enable_global_speaker_diarization": True
+    }
+})
+
+# Deepgram: High accuracy with true streaming
+deepgram_config = DebabelizerConfig({
     "deepgram": {
-        "api_key": "your_key",
+        "api_key": "your_key", 
         "model": "nova-2",
-        "language": "en-US"
-    },
-    "elevenlabs": {
-        "api_key": "your_key",
-        "voice": "Rachel",
-        "stability": 0.5,
-        "similarity_boost": 0.75
-    },
-    "preferences": {
-        "stt_provider": "deepgram",
-        "tts_provider": "elevenlabs",
-        "optimize_for": "quality"
+        "language": "en",
+        "interim_results": True,
+        "vad_events": True
     }
 })
 
-# Method 2: Environment-based (recommended)
-config = DebabelizerConfig()  # Auto-loads from environment
-
-processor = VoiceProcessor(config=config)
-```
-
-### Provider-Specific Configuration
-
-#### Whisper (Local/Offline)
-```python
-config = DebabelizerConfig({
-    "whisper": {
-        "model_size": "medium",      # tiny, base, small, medium, large
-        "device": "cuda",            # cpu, cuda, mps, auto
-        "fp16": True,                # Faster inference
-        "temperature": 0.0,          # Deterministic output
-        "language": None             # Auto-detect language
-    }
-})
-```
-
-#### Google Cloud
-```python
-config = DebabelizerConfig({
+# Google Cloud: Enterprise features (requires service account)
+google_config = DebabelizerConfig({
     "google": {
-        "credentials_path": "/path/to/credentials.json",
+        "credentials_path": "/path/to/service-account.json",
         "project_id": "your-project-id",
-        "model": "latest_long",      # STT model
-        "voice_type": "Neural2",     # TTS voice type
-        "enable_speaker_diarization": True
+        "model": "latest_long",
+        "enable_speaker_diarization": True,
+        "enable_word_time_offsets": True
     }
 })
-```
 
-#### Azure
-```python
-config = DebabelizerConfig({
+# Azure: Microsoft ecosystem integration
+azure_config = DebabelizerConfig({
     "azure": {
         "api_key": "your_key",
         "region": "eastus",
         "language": "en-US",
-        "voice": "en-US-JennyNeural",
-        "enable_speaker_identification": True
+        "enable_dictation": True,
+        "profanity_filter": True
+    }
+})
+
+# OpenAI Whisper: Free local processing
+whisper_config = DebabelizerConfig({
+    "whisper": {
+        "model_size": "medium",  # tiny, base, small, medium, large
+        "device": "cuda",        # cpu, cuda, mps, auto
+        "fp16": True,           # Faster inference with GPU
+        "language": None        # Auto-detect
     }
 })
 ```
 
-## 📦 Including in Your Projects
+### Web Application Integration
 
-### As a Dependency
-
-#### requirements.txt
-```txt
-# Basic installation
-debabelizer
-
-# With specific providers
-debabelizer[deepgram,elevenlabs]
-
-# All providers
-debabelizer[all]
-
-# From GitHub (latest development)
-git+https://github.com/your-org/debabelizer.git
-
-# Specific version
-debabelizer==1.0.0
-```
-
-#### pyproject.toml
-```toml
-[project]
-dependencies = [
-    "debabelizer[deepgram,openai]>=1.0.0"
-]
-
-# Optional dependencies for different use cases
-[project.optional-dependencies]
-voice = ["debabelizer[all]"]
-transcription-only = ["debabelizer[whisper,deepgram]"]
-synthesis-only = ["debabelizer[elevenlabs,openai]"]
-```
-
-#### setup.py
 ```python
-from setuptools import setup
-
-setup(
-    name="your-project",
-    install_requires=[
-        "debabelizer[whisper,elevenlabs]>=1.0.0",
-    ],
-    extras_require={
-        "full-voice": ["debabelizer[all]>=1.0.0"],
-    }
-)
-```
-
-#### Poetry
-```toml
-[tool.poetry.dependencies]
-python = "^3.8"
-debabelizer = {extras = ["deepgram", "openai"], version = "^1.0.0"}
-
-# Or for all providers
-# debabelizer = {extras = ["all"], version = "^1.0.0"}
-```
-
-### Docker Integration
-```dockerfile
-FROM python:3.9-slim
-
-# Install system dependencies for audio processing
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install your application with Debabelizer
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-# Example requirements.txt content:
-# debabelizer[whisper,elevenlabs]==1.0.0
-# your-other-dependencies
-
-COPY . .
-CMD ["python", "your_app.py"]
-```
-
-## 🏗️ Integration Examples
-
-### Web API Integration
-```python
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, WebSocket
 from debabelizer import VoiceProcessor, DebabelizerConfig
 import asyncio
 
@@ -409,283 +476,68 @@ app = FastAPI()
 config = DebabelizerConfig()
 processor = VoiceProcessor(config=config)
 
-@app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
-    # Save uploaded file
+@app.post("/transcribe-chunk")
+async def transcribe_chunk(file: UploadFile = File(...)):
+    """
+    Recommended approach for web applications.
+    Process audio chunks from browser MediaRecorder.
+    """
     content = await file.read()
     
-    # Transcribe using raw audio data
+    # Use audio transcription for buffered chunks
     result = await processor.transcribe_audio(
         audio_data=content,
-        audio_format="wav"
+        audio_format="webm",    # Common browser format
+        sample_rate=48000,      # Browser standard
+        language="en"
     )
     
     return {
         "text": result.text,
         "language": result.language_detected,
         "confidence": result.confidence,
-        "duration": result.duration
-    }
-
-@app.post("/synthesize")
-async def synthesize_text(text: str, voice: str = "default"):
-    result = await processor.synthesize(text=text, voice=voice)
-    
-    return {
-        "audio_size": result.size_bytes,
         "duration": result.duration,
-        "format": result.format
-        # Note: Return audio_data as base64 or save to file
+        "method": "chunk_transcription"
     }
-```
 
-### Background Task Processing
-```python
-import asyncio
-from celery import Celery
-from debabelizer import VoiceProcessor, DebabelizerConfig
-
-app = Celery('voice_processing')
-
-@app.task
-def process_audio_file(file_path: str, options: dict):
-    """Background task for processing large audio files"""
+@app.websocket("/transcribe-stream")
+async def transcribe_stream(websocket: WebSocket):
+    """
+    True streaming approach for specialized applications.
+    Requires careful connection management.
+    """
+    await websocket.accept()
     
-    async def _process():
-        config = DebabelizerConfig()
-        processor = VoiceProcessor(config=config)
-        
-        # Process with specified options
-        result = await processor.transcribe_file(
-            file_path,
-            language=options.get('language'),
-            **options.get('provider_options', {})
-        )
-        
-        return {
-            "text": result.text,
-            "language": result.language_detected,
-            "confidence": result.confidence,
-            "words": [
-                {
-                    "word": w.word,
-                    "start": w.start_time,
-                    "end": w.end_time,
-                    "confidence": w.confidence
-                }
-                for w in result.words
-            ]
-        }
-    
-    # Run async function in sync context
-    return asyncio.run(_process())
-```
-
-### Django Integration
-```python
-# views.py
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from debabelizer import VoiceProcessor, DebabelizerConfig
-import asyncio
-import json
-
-# Initialize once at module level
-config = DebabelizerConfig()
-processor = VoiceProcessor(config=config)
-
-@csrf_exempt
-async def transcribe_view(request):
-    if request.method == 'POST':
-        audio_file = request.FILES.get('audio')
-        
-        if audio_file:
-            # Read audio data
-            audio_data = audio_file.read()
-            
-            # Transcribe
-            result = await processor.transcribe_audio(
-                audio_data=audio_data,
-                audio_format="wav"
-            )
-            
-            return JsonResponse({
-                'success': True,
-                'text': result.text,
-                'language': result.language_detected,
-                'confidence': result.confidence
-            })
-    
-    return JsonResponse({'success': False, 'error': 'Invalid request'})
-
-# urls.py
-from django.urls import path
-from . import views
-
-urlpatterns = [
-    path('api/transcribe/', views.transcribe_view, name='transcribe'),
-]
-```
-
-### Batch Processing Script
-```python
-#!/usr/bin/env python3
-"""
-Batch audio processing script
-Usage: python batch_process.py /path/to/audio/files --output /path/to/results
-"""
-
-import asyncio
-import argparse
-from pathlib import Path
-import json
-from debabelizer import VoiceProcessor, DebabelizerConfig
-
-async def process_files(input_dir: Path, output_dir: Path, provider: str = None):
-    """Process all audio files in a directory"""
-    
-    config = DebabelizerConfig()
-    processor = VoiceProcessor(
-        stt_provider=provider,
-        config=config
+    # Start streaming session
+    session_id = await processor.start_streaming_transcription(
+        audio_format="pcm",
+        sample_rate=16000,
+        language="en"
     )
-    
-    # Find all audio files
-    audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
-    audio_files = [
-        f for f in input_dir.rglob('*') 
-        if f.suffix.lower() in audio_extensions
-    ]
-    
-    print(f"Found {len(audio_files)} audio files")
-    
-    # Process files
-    for audio_file in audio_files:
-        print(f"Processing: {audio_file.name}")
-        
-        try:
-            result = await processor.transcribe_file(str(audio_file))
-            
-            # Save result
-            output_file = output_dir / f"{audio_file.stem}.json"
-            with open(output_file, 'w') as f:
-                json.dump({
-                    "file": str(audio_file),
-                    "text": result.text,
-                    "language": result.language_detected,
-                    "confidence": result.confidence,
-                    "duration": result.duration,
-                    "word_count": len(result.text.split())
-                }, f, indent=2)
-                
-            print(f"✅ Saved: {output_file}")
-            
-        except Exception as e:
-            print(f"❌ Error processing {audio_file}: {e}")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input_dir", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--provider", choices=["soniox", "deepgram", "google", "azure", "whisper"])
-    
-    args = parser.parse_args()
-    
-    args.output.mkdir(exist_ok=True)
-    asyncio.run(process_files(args.input_dir, args.output, args.provider))
-```
-
-## 🎯 Advanced Usage
-
-### Multi-Provider Workflow
-```python
-async def multi_provider_transcription(audio_file: str):
-    """Use multiple providers for comparison or fallback"""
-    
-    config = DebabelizerConfig()
-    
-    # Primary: High accuracy
-    primary = VoiceProcessor(stt_provider="google", config=config)
-    
-    # Fallback: Local processing
-    fallback = VoiceProcessor(stt_provider="whisper", config=config)
     
     try:
-        # Try primary provider first
-        result = await primary.transcribe_file(audio_file)
-        print(f"Primary result: {result.text}")
-        return result
-        
+        while True:
+            # Receive audio chunk from WebSocket
+            audio_chunk = await websocket.receive_bytes()
+            
+            # Stream to STT provider
+            await processor.stream_audio(session_id, audio_chunk)
+            
+            # Get results and send back
+            async for result in processor.get_streaming_results(session_id):
+                await websocket.send_json({
+                    "text": result.text,
+                    "is_final": result.is_final,
+                    "confidence": result.confidence
+                })
+                
+                if result.is_final:
+                    break
+                    
     except Exception as e:
-        print(f"Primary failed: {e}, using fallback...")
-        
-        # Use local fallback
-        result = await fallback.transcribe_file(audio_file)
-        print(f"Fallback result: {result.text}")
-        return result
-```
-
-### Cost Optimization
-```python
-async def cost_optimized_processing():
-    """Automatically select cheapest provider for your needs"""
-    
-    config = DebabelizerConfig({
-        "preferences": {
-            "optimize_for": "cost",  # Will prefer cheaper providers
-            "auto_select": True
-        }
-    })
-    
-    processor = VoiceProcessor(config=config)
-    
-    # Get cost estimates
-    duration = 300  # 5 minutes
-    
-    estimates = {
-        "whisper": 0.0,  # Free
-        "soniox": processor._get_provider_cost("soniox", duration),
-        "deepgram": processor._get_provider_cost("deepgram", duration),
-    }
-    
-    print("Cost estimates:", estimates)
-    
-    # Process with auto-selected provider
-    result = await processor.transcribe_file("audio.wav")
-    return result
-```
-
-### Voice Cloning Pipeline
-```python
-async def voice_cloning_pipeline():
-    """Complete pipeline: Record → Transcribe → Clone → Synthesize"""
-    
-    config = DebabelizerConfig({
-        "deepgram": {"api_key": "your_key"},
-        "elevenlabs": {"api_key": "your_key"}
-    })
-    
-    stt_processor = VoiceProcessor(stt_provider="deepgram", config=config)
-    tts_processor = VoiceProcessor(tts_provider="elevenlabs", config=config)
-    
-    # 1. Transcribe original audio
-    transcript = await stt_processor.transcribe_file("speaker_sample.wav")
-    print(f"Original text: {transcript.text}")
-    
-    # 2. Get available voices
-    voices = await tts_processor.get_available_voices()
-    target_voice = voices[0]  # Select voice
-    
-    # 3. Synthesize new text with target voice
-    new_text = "This is new text in the cloned voice!"
-    result = await tts_processor.synthesize(
-        text=new_text,
-        voice=target_voice
-    )
-    
-    # 4. Save cloned speech
-    with open("cloned_speech.mp3", "wb") as f:
-        f.write(result.audio_data)
+        print(f"Streaming error: {e}")
+    finally:
+        await processor.stop_streaming_transcription(session_id)
 ```
 
 ## 🧪 Testing
@@ -698,7 +550,7 @@ python -m pytest
 # Specific test categories
 python -m pytest tests/test_voice_processor.py  # Core functionality
 python -m pytest tests/test_config.py          # Configuration
-python -m pytest tests/test_base_providers.py  # Provider interfaces
+python -m pytest tests/test_providers/         # Provider tests
 
 # Integration tests (requires API keys)
 python -m pytest tests/test_integration.py
@@ -707,20 +559,30 @@ python -m pytest tests/test_integration.py
 python -m pytest --cov=debabelizer --cov-report=html
 ```
 
-### Test Configuration
-Set up test environment:
+### Test Your Provider Setup
 ```bash
-# Copy example config
-cp .env.example .env
-
-# Add your API keys for integration tests
-export DEEPGRAM_API_KEY="your_key"
-export ELEVENLABS_API_KEY="your_key"
-# ... other keys
-
-# Run integration tests
-python -m pytest tests/test_integration.py -v
+# Test specific providers (requires API keys in .env)
+python tests/test_openai_tts.py      # OpenAI TTS (tested ✅)
+python tests/test_soniox_stt.py      # Soniox STT (tested ✅) 
+python tests/test_deepgram_stt.py    # Deepgram STT (tested ✅)
+python tests/test_google_stt.py      # Google STT (needs auth setup)
+python tests/test_azure_stt.py       # Azure STT (needs auth setup)
 ```
+
+## 🚨 Known Issues & Limitations
+
+### Current Limitations
+1. **Google Cloud & Azure**: Code is fixed but requires proper authentication setup for testing
+2. **TTS Streaming**: Most providers simulate streaming (download full audio, then chunk) - only true for specialized streaming TTS APIs
+3. **OpenAI TTS**: Correctly reports 24kHz output, but doesn't support custom sample rates
+4. **WebM Audio**: Some providers may need audio format conversion for browser-generated WebM/Opus
+
+### Fixed Issues
+- ✅ **Google STT**: Fixed critical async/sync mixing in streaming implementation
+- ✅ **Azure STT**: Fixed async/sync mixing in event handlers  
+- ✅ **OpenAI TTS**: Fixed sample rate accuracy, duration estimation, and streaming transparency
+- ✅ **Soniox STT**: Fixed method name mismatches and session management
+- ✅ **Deepgram STT**: Implemented true WebSocket streaming
 
 ## 🤝 Contributing
 
@@ -734,11 +596,17 @@ pip install -e .[dev]
 pre-commit install
 ```
 
+### Testing New Providers
+1. Add comprehensive test coverage
+2. Follow the systematic debugging approach documented in CLAUDE.md
+3. Test both file-based and streaming implementations
+4. Verify error handling and edge cases
+
 ### Adding New Providers
 1. Implement the provider interface in `src/debabelizer/providers/`
 2. Add configuration support in `src/debabelizer/core/config.py`
 3. Update processor in `src/debabelizer/core/processor.py`
-4. Add tests in `tests/`
+4. Add comprehensive tests in `tests/`
 5. Update documentation
 
 ## 📄 License
@@ -752,7 +620,7 @@ This project is licensed under the MIT License.
 
 ## 🙏 Acknowledgments
 
-- OpenAI for Whisper models
+- OpenAI for Whisper models and TTS API
 - All provider teams for their excellent APIs
 - Contributors and testers
 - The open-source community
@@ -760,3 +628,5 @@ This project is licensed under the MIT License.
 ---
 
 **Debabelizer** - *Breaking down language barriers, one voice at a time* 🌍🗣️
+
+*Last updated: 2025-07-31 - Comprehensive testing and bug fixes for OpenAI TTS, Soniox STT, Deepgram STT, Google Cloud STT, and Azure STT implementations*

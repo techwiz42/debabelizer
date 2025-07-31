@@ -69,6 +69,16 @@ class DeepgramSTTProvider(STTProvider):
         # Extract detect_language but don't pass it to Deepgram API
         detect_language = kwargs.get("detect_language", False)
         
+        # Define valid PrerecordedOptions constructor parameters
+        # Based on Deepgram SDK v3+ PrerecordedOptions class
+        valid_params = {
+            "model", "language", "version", "tier", "punctuate", "profanity_filter",
+            "redact", "diarize", "ner", "multichannel", "alternatives", "numerals",
+            "smart_format", "utterances", "utt_split", "dictation", "measurements",
+            "filler_words", "summarize", "detect_language", "paragraphs", 
+            "sentiment", "intents", "topics", "extra"
+        }
+        
         options = {
             "model": kwargs.get("model", self.default_model),
             "language": language or self.default_language,
@@ -79,20 +89,23 @@ class DeepgramSTTProvider(STTProvider):
             "profanity_filter": kwargs.get("profanity_filter", False),
             "redact": kwargs.get("redact", []),
             "alternatives": kwargs.get("alternatives", 1),
-            "numerals": kwargs.get("numerals", True),
-            "search": kwargs.get("search", []),
-            "keywords": kwargs.get("keywords", [])
+            "numerals": kwargs.get("numerals", True)
         }
         
-        # Add confidence scores
-        if kwargs.get("confidence", True):
-            options["confidence"] = True
-            
-        # Add word-level timestamps
+        # Add other valid parameters if provided
+        for param in ["search", "keywords", "paragraphs", "sentiment", "intents", "topics"]:
+            if param in kwargs:
+                if param in valid_params:
+                    options[param] = kwargs[param]
+        
+        # Add word-level timestamps if requested (default True)
         if kwargs.get("words", True):
             options["words"] = True
             
-        return options
+        # Filter out any parameters not supported by PrerecordedOptions
+        filtered_options = {k: v for k, v in options.items() if k in valid_params}
+            
+        return filtered_options
         
     def _prepare_streaming_options(self, language: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Prepare Deepgram API options for streaming transcription"""
@@ -353,6 +366,7 @@ class DeepgramSTTProvider(STTProvider):
             else:
                 raise ProviderError(f"Deepgram transcription failed: {e}", "deepgram")
                 
+                
     async def start_streaming(
         self,
         audio_format: str = "wav",
@@ -361,11 +375,11 @@ class DeepgramSTTProvider(STTProvider):
         language_hints: Optional[List[str]] = None,
         **kwargs
     ) -> str:
-        """Start a streaming transcription session"""
+        """Start a true WebSocket streaming transcription session"""
         
         try:
             # Dynamic import
-            from deepgram import DeepgramClient, LiveOptions
+            from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
             
             # Generate session ID
             import uuid
@@ -375,10 +389,12 @@ class DeepgramSTTProvider(STTProvider):
             deepgram = DeepgramClient(self.api_key)
             
             # Prepare options (use streaming-specific options)
+            # Extract channels to avoid duplicate parameter error
+            channels = kwargs.pop("channels", 1)
             base_options = self._prepare_streaming_options(
                 language, 
                 sample_rate=sample_rate,
-                channels=kwargs.get("channels", 1),
+                channels=channels,
                 **kwargs
             )
             
@@ -388,8 +404,8 @@ class DeepgramSTTProvider(STTProvider):
             
             options = LiveOptions(**base_options)
             
-            # Create connection
-            dg_connection = deepgram.listen.asyncwebsocket.v("1")
+            # Create WebSocket connection
+            dg_connection = deepgram.listen.websocket.v("1")
             
             # Store connection for this session
             if not hasattr(self, '_streaming_sessions'):
@@ -399,26 +415,78 @@ class DeepgramSTTProvider(STTProvider):
                 "connection": dg_connection,
                 "options": options,
                 "results": asyncio.Queue(),
-                "connected": False
+                "connected": False,
+                "error": None
             }
             
-            # Setup event handlers
-            async def on_message(result, **kwargs):
-                if session_id in self._streaming_sessions:
-                    await self._streaming_sessions[session_id]["results"].put(result)
+            # Setup event handlers with proper async handling
+            # Capture the provider instance to avoid 'self' confusion with Deepgram connection
+            provider_instance = self
+            
+            def on_open(self, open, **kwargs):
+                logger.info(f"Deepgram WebSocket opened for session {session_id}")
+                if hasattr(provider_instance, '_streaming_sessions') and session_id in provider_instance._streaming_sessions:
+                    provider_instance._streaming_sessions[session_id]["connected"] = True
+            
+            def on_message(self, result, **kwargs):
+                if hasattr(provider_instance, '_streaming_sessions') and session_id in provider_instance._streaming_sessions:
+                    # Use call_soon_threadsafe to schedule the put operation in the main event loop
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.call_soon_threadsafe(
+                                lambda: asyncio.create_task(provider_instance._streaming_sessions[session_id]["results"].put(result))
+                            )
+                    except RuntimeError:
+                        # No event loop running, store directly (synchronous fallback)
+                        try:
+                            provider_instance._streaming_sessions[session_id]["results"].put_nowait(result)
+                        except asyncio.QueueFull:
+                            pass  # Skip if queue is full
                     
-            async def on_error(error, **kwargs):
+            def on_error(self, error, **kwargs):
                 logger.error(f"Deepgram streaming error for session {session_id}: {error}")
-                
-            # Connect handlers
-            dg_connection.on("message", on_message)
-            dg_connection.on("error", on_error)
+                if hasattr(provider_instance, '_streaming_sessions') and session_id in provider_instance._streaming_sessions:
+                    provider_instance._streaming_sessions[session_id]["error"] = error
+                    # Use call_soon_threadsafe to schedule the put operation in the main event loop
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.call_soon_threadsafe(
+                                lambda: asyncio.create_task(provider_instance._streaming_sessions[session_id]["results"].put({"error": str(error)}))
+                            )
+                    except RuntimeError:
+                        # No event loop running, store directly (synchronous fallback)
+                        try:
+                            provider_instance._streaming_sessions[session_id]["results"].put_nowait({"error": str(error)})
+                        except asyncio.QueueFull:
+                            pass  # Skip if queue is full
+            
+            def on_close(self, close, **kwargs):
+                logger.info(f"Deepgram WebSocket closed for session {session_id}")
+                if hasattr(provider_instance, '_streaming_sessions') and session_id in provider_instance._streaming_sessions:
+                    provider_instance._streaming_sessions[session_id]["connected"] = False
+            
+            # Register handlers
+            dg_connection.on(LiveTranscriptionEvents.Open, on_open)
+            dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
+            dg_connection.on(LiveTranscriptionEvents.Error, on_error)
+            dg_connection.on(LiveTranscriptionEvents.Close, on_close)
             
             # Start connection
-            if await dg_connection.start(options):
-                self._streaming_sessions[session_id]["connected"] = True
-                logger.info(f"Started Deepgram streaming session: {session_id}")
-                return session_id
+            if dg_connection.start(options):
+                # Wait for connection to establish - poll until connected or timeout
+                for attempt in range(50):  # Wait up to 5 seconds (50 * 0.1s)
+                    await asyncio.sleep(0.1)
+                    if session_id in self._streaming_sessions and self._streaming_sessions[session_id]["connected"]:
+                        logger.info(f"Started Deepgram streaming session: {session_id}")
+                        return session_id
+                    if session_id in self._streaming_sessions and self._streaming_sessions[session_id]["error"]:
+                        error = self._streaming_sessions[session_id]["error"]
+                        raise ProviderConnectionError(f"Deepgram connection error: {error}", "deepgram")
+                
+                # Timeout waiting for connection
+                raise ProviderConnectionError("Timeout waiting for Deepgram connection", "deepgram")
             else:
                 raise ProviderConnectionError("Failed to start Deepgram streaming session", "deepgram")
                 
@@ -446,7 +514,7 @@ class DeepgramSTTProvider(STTProvider):
             
         try:
             # Send audio data
-            await session["connection"].send(audio_chunk)
+            session["connection"].send(audio_chunk)
             
         except Exception as e:
             raise ProviderError(f"Failed to send audio to session {session_id}: {e}", "deepgram")
@@ -465,7 +533,7 @@ class DeepgramSTTProvider(STTProvider):
         try:
             # Send finalize message as JSON
             finalize_message = json.dumps({"type": "Finalize"})
-            await session["connection"].send(finalize_message)
+            session["connection"].send(finalize_message)
             
         except Exception as e:
             logger.error(f"Failed to send finalize message to session {session_id}: {e}")
@@ -474,7 +542,7 @@ class DeepgramSTTProvider(STTProvider):
         self, 
         session_id: str
     ) -> AsyncGenerator[StreamingResult, None]:
-        """Get streaming transcription results"""
+        """Get streaming transcription results from true WebSocket connection"""
         
         if not hasattr(self, '_streaming_sessions') or session_id not in self._streaming_sessions:
             raise ProviderError(f"Streaming session {session_id} not found", "deepgram")
@@ -483,10 +551,15 @@ class DeepgramSTTProvider(STTProvider):
         results_queue = session["results"]
         
         try:
-            while session["connected"]:
+            while session["connected"] or not results_queue.empty():
                 try:
                     # Wait for results with timeout
                     result = await asyncio.wait_for(results_queue.get(), timeout=1.0)
+                    
+                    # Handle error messages
+                    if isinstance(result, dict) and "error" in result:
+                        logger.error(f"Received error in streaming results: {result['error']}")
+                        continue
                     
                     # Handle VAD events
                     if hasattr(result, 'type'):
@@ -495,14 +568,10 @@ class DeepgramSTTProvider(STTProvider):
                             streaming_result = StreamingResult(
                                 session_id=session_id,
                                 is_final=False,
-                                text="",
+                                text="[SPEECH_STARTED]",
                                 confidence=1.0,
                                 timestamp=None,
-                                processing_time_ms=0,
-                                metadata={
-                                    "event": "speech_started",
-                                    "vad": True
-                                }
+                                processing_time_ms=0
                             )
                             yield streaming_result
                             continue
@@ -511,20 +580,16 @@ class DeepgramSTTProvider(STTProvider):
                             streaming_result = StreamingResult(
                                 session_id=session_id,
                                 is_final=True,
-                                text="",
+                                text="[UTTERANCE_END]",
                                 confidence=1.0,
                                 timestamp=None,
-                                processing_time_ms=0,
-                                metadata={
-                                    "event": "utterance_end",
-                                    "speech_final": True
-                                }
+                                processing_time_ms=0
                             )
                             yield streaming_result
                             continue
                     
                     # Parse transcription result
-                    if hasattr(result, 'channel') and result.channel.alternatives:
+                    if hasattr(result, 'channel') and result.channel and hasattr(result.channel, 'alternatives') and result.channel.alternatives:
                         alternative = result.channel.alternatives[0]
                         
                         # Extract metadata
@@ -533,9 +598,13 @@ class DeepgramSTTProvider(STTProvider):
                             "speech_final": getattr(result, 'speech_final', False)
                         }
                         
-                        # Add detected language if available
-                        if hasattr(result, 'channel_index') and hasattr(result.channel_index[0], 'detected_language'):
-                            metadata["detected_language"] = result.channel_index[0].detected_language
+                        # Add duration if available
+                        if hasattr(result, 'duration'):
+                            metadata["duration"] = result.duration
+                            
+                        # Add start time if available
+                        if hasattr(result, 'start'):
+                            metadata["start"] = result.start
                         
                         # Extract words if available
                         if hasattr(alternative, 'words') and alternative.words:
@@ -556,14 +625,15 @@ class DeepgramSTTProvider(STTProvider):
                             text=alternative.transcript,
                             confidence=getattr(alternative, 'confidence', 1.0),
                             timestamp=None,  # Will be set by session manager
-                            processing_time_ms=0,
-                            metadata=metadata
+                            processing_time_ms=0
                         )
                         
                         yield streaming_result
                         
                 except asyncio.TimeoutError:
-                    # Continue waiting for more results
+                    # Check if we should continue waiting
+                    if not session["connected"] and results_queue.empty():
+                        break
                     continue
                 except Exception as e:
                     logger.error(f"Error processing streaming result: {e}")
@@ -581,9 +651,14 @@ class DeepgramSTTProvider(STTProvider):
         session = self._streaming_sessions[session_id]
         
         try:
-            # Close connection
+            # Send finalize message before closing
             if session["connected"]:
-                await session["connection"].finish()
+                await self.finalize_streaming(session_id)
+                await asyncio.sleep(0.1)  # Give time for final results
+                
+            # Close connection
+            if session["connection"]:
+                session["connection"].finish()
                 session["connected"] = False
                 
             # Clean up session

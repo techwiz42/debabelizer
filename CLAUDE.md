@@ -102,11 +102,13 @@ processor = VoiceProcessor(config=config)
 ### 1. Deepgram STT Provider ✅
 **Features**:
 - High-accuracy speech recognition with Nova-2 model
-- Real-time WebSocket streaming transcription
+- Real-time WebSocket streaming transcription (full-duplex)
 - 40+ language support
 - Word-level timestamps and confidence scores
 - Automatic language detection
 - Speaker diarization support
+- Ultra-low latency (<300ms)
+- Continuous interim and final transcripts
 
 **Files Added**:
 - `src/debabelizer/providers/stt/deepgram.py`
@@ -278,13 +280,13 @@ whisper:
 ## Current Provider Support Status
 
 ### Speech-to-Text (STT) Providers:
-| Provider | Status | Features |
-|----------|--------|----------|
-| **Soniox** | ✅ Implemented | Real-time streaming, telephony optimized |
-| **Deepgram** | ✅ Implemented | Nova-2 model, 40+ languages, streaming |
-| **Google Cloud** | ✅ Implemented | 125+ languages, streaming, diarization |
-| **Azure** | ✅ Implemented | 140+ languages, streaming, speaker ID |
-| **OpenAI Whisper** | ✅ Implemented | 99+ languages, local/offline, zero cost |
+| Provider | Status | Streaming Support | Features |
+|----------|--------|-------------------|----------|
+| **Soniox** | ✅ Implemented | ✅ WebSocket streaming | Real-time streaming, telephony optimized, token-level output |
+| **Deepgram** | ✅ Implemented | ✅ WebSocket streaming | Nova-2 model, 40+ languages, <300ms latency, full-duplex |
+| **Google Cloud** | ✅ Implemented | ✅ WebSocket streaming | 125+ languages, streaming, diarization |
+| **Azure** | ✅ Implemented | ✅ WebSocket streaming | 140+ languages, streaming, speaker ID |
+| **OpenAI Whisper** | ✅ Implemented | ❌ Batch only | 99+ languages, local/offline, zero cost |
 
 ### Text-to-Speech (TTS) Providers:
 | Provider | Status | Features |
@@ -392,6 +394,7 @@ processor = VoiceProcessor(config=config)
 
 ---
 
-*Last Updated: 2025-01-27*
+*Last Updated: 2025-01-31*
 *Progress: 13/13 major tasks completed ✅*
 *Status: COMPLETE - All primary objectives achieved + bonus Whisper implementation*
+*Note: All STT providers except Whisper support real-time WebSocket streaming*
