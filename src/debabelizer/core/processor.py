@@ -256,6 +256,15 @@ class VoiceProcessor:
             provider_config_clean = {k: v for k, v in provider_config.items() if k != "api_key"}
             return provider_class(api_key, **provider_config_clean)
         
+        # Special handling for Soniox (expects api_key as keyword argument)
+        if provider_name == "soniox":
+            api_key = self.config.get_provider_config(provider_name, "api_key")
+            if not api_key:
+                raise ProviderError(f"API key not configured for {provider_name}")
+            # Remove api_key from provider_config to avoid duplicate parameter error
+            provider_config_clean = {k: v for k, v in provider_config.items() if k != "api_key"}
+            return provider_class(api_key=api_key, **provider_config_clean)
+        
         # Standard API key providers
         api_key = self.config.get_provider_config(provider_name, "api_key")
         if not api_key:

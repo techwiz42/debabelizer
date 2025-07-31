@@ -41,8 +41,11 @@ class SonioxSTTProvider(STTProvider):
         "gu", "pa", "or", "as", "mr", "ne", "si", "my", "km", "lo"
     ]
     
-    def __init__(self, api_key: str, model: str = "stt-rt-preview", **config):
-        super().__init__(api_key, **config)
+    def __init__(self, api_key: Optional[str] = None, model: str = "stt-rt-preview", **config):
+        # Remove api_key from config to avoid duplicate argument error
+        config_copy = config.copy()
+        config_copy.pop('api_key', None)  # Remove if present
+        super().__init__(api_key=api_key, **config_copy)
         self.model = model
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.sessions: Dict[str, Dict[str, Any]] = {}
