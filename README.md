@@ -196,15 +196,15 @@ async def streaming_transcription():
 asyncio.run(streaming_transcription())
 ```
 
-### Chunk-Based Transcription (Recommended for Web Apps)
+### File-Based Transcription (Alternative to Streaming)
 ```python
 import asyncio
 from debabelizer import VoiceProcessor, DebabelizerConfig
 
-async def chunk_transcription():
+async def file_transcription():
     """
-    Process audio chunks using file API - more reliable than streaming.
-    Ideal for web applications with buffered audio from browsers.
+    Process complete audio files or buffered audio chunks.
+    Alternative to streaming for applications that can buffer audio.
     """
     config = DebabelizerConfig({
         "deepgram": {"api_key": "your_key"}
@@ -212,14 +212,14 @@ async def chunk_transcription():
     
     processor = VoiceProcessor(stt_provider="deepgram", config=config)
     
-    # Process buffered audio chunks (e.g., from WebSocket/MediaRecorder)
-    # This approach is more reliable than streaming for web applications
+    # Process complete audio file
+    result = await processor.transcribe_file("audio.wav")
     
-    # Example: Process 2-second audio buffer from browser
+    # Or process audio data from memory (e.g., from web upload)
     with open("audio_chunk.webm", "rb") as f:
         chunk_data = f.read()  # WebM/Opus from MediaRecorder
     
-    # Process chunk using file API (not streaming)
+    # Process audio data directly
     result = await processor.transcribe_audio(
         audio_data=chunk_data,
         audio_format="webm",     # Browser WebM/Opus format
@@ -227,11 +227,11 @@ async def chunk_transcription():
         language="en"
     )
     
-    print(f"Chunk result: {result.text}")
+    print(f"Result: {result.text}")
     print(f"Confidence: {result.confidence}")
     print(f"Language: {result.language_detected}")
 
-asyncio.run(chunk_transcription())
+asyncio.run(file_transcription())
 ```
 
 ## 🔧 Configuration
@@ -312,20 +312,20 @@ SONIOX_API_KEY=your_soniox_key
 
 ### Speech-to-Text (STT) Providers
 
-| Provider | Status | Streaming | Testing | Authentication | Best For |
-|----------|--------|-----------|---------|----------------|----------|
-| **Soniox** | ✅ **Verified** | True WebSocket streaming | ✅ **Tested & Fixed** | API Key | Real-time applications |
-| **Deepgram** | ✅ **Verified** | True WebSocket streaming | ✅ **Tested & Fixed** | API Key | High accuracy & speed |
-| **Google Cloud** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Needs Auth Setup** | Service Account JSON | Enterprise features |
-| **Azure** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Needs Auth Setup** | API Key + Region | Microsoft ecosystem |
-| **OpenAI Whisper (Local)** | ✅ **Verified** | File-based only | ✅ **Tested** | None (offline) | Cost-free processing |
-| **OpenAI Whisper (API)** | ✅ **Available** | File-based only | ⚠️ **Not tested** | OpenAI API Key | Cloud Whisper |
+| Provider | Status | Streaming | Language Auto-Detection | Testing | Authentication | Best For |
+|----------|--------|-----------|-------------------------|---------|----------------|----------|
+| **Soniox** | ✅ **Verified** | True WebSocket streaming | ❓ **Unverified** | ✅ **Tested & Fixed** | API Key | Real-time applications |
+| **Deepgram** | ✅ **Verified** | True WebSocket streaming | ✅ **Claimed** | ✅ **Tested & Fixed** | API Key | High accuracy & speed |
+| **Google Cloud** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Limited** | ⚠️ **Needs Auth Setup** | Service Account JSON | Enterprise features |
+| **Azure** | ✅ **Code Fixed** | Session-based streaming | ✅ **Claimed** | ⚠️ **Needs Auth Setup** | API Key + Region | Microsoft ecosystem |
+| **OpenAI Whisper (Local)** | ✅ **Verified** | File-based only | ❓ **Unclear** | ✅ **Tested** | None (offline) | Cost-free processing |
+| **OpenAI Whisper (API)** | ✅ **Available** | File-based only | ❓ **Unclear** | ⚠️ **Not tested** | OpenAI API Key | Cloud Whisper |
 
 ### Text-to-Speech (TTS) Providers
 
 | Provider | Status | Streaming | Testing | Authentication | Best For |
 |----------|--------|-----------|---------|----------------|----------|
-| **ElevenLabs** | ✅ **Available** | Simulated streaming | ⚠️ **Not tested** | API Key | Voice cloning & quality |
+| **ElevenLabs** | ✅ **Verified** | Simulated streaming | ✅ **Tested & Working** | API Key | Voice cloning & quality |
 | **OpenAI** | ✅ **Verified** | Simulated streaming | ✅ **Tested & Fixed** | OpenAI API Key | Natural voices |
 | **Google Cloud** | ✅ **Available** | TBD | ⚠️ **Not tested** | Service Account JSON | Enterprise features |
 | **Azure** | ✅ **Available** | TBD | ⚠️ **Not tested** | API Key + Region | Microsoft ecosystem |
@@ -334,6 +334,7 @@ SONIOX_API_KEY=your_soniox_key
 
 #### ✅ **Fully Tested & Verified**
 - **OpenAI TTS**: All features working, issues fixed (sample rate accuracy, duration estimation, streaming transparency)
+- **ElevenLabs TTS**: All features working, fully tested and verified
 - **Soniox STT**: Streaming implementation fixed (method names, session management)
 - **Deepgram STT**: True WebSocket streaming implemented and working
 
@@ -342,69 +343,12 @@ SONIOX_API_KEY=your_soniox_key
 - **Azure STT**: Fixed critical async/sync mixing bugs in event handlers
 
 #### ⚠️ **Available but Needs Testing**
-- **ElevenLabs TTS**: Implementation exists but not tested
 - **Google Cloud TTS**: Implementation exists but not tested  
 - **Azure TTS**: Implementation exists but not tested
 - **OpenAI Whisper API**: Implementation exists but not tested
 
 ## 🔧 Advanced Usage
 
-### Chunk vs Streaming Transcription
-
-**When to use File/Chunk Transcription (`transcribe_audio`):**
-- ✅ Web applications with browser audio (WebM/Opus from MediaRecorder)
-- ✅ Buffered audio processing (0.5-3 second chunks)
-- ✅ More reliable than streaming for web apps
-- ✅ Better error handling and debugging
-- ✅ Consistent results with file APIs
-- ✅ **Recommended approach for most applications**
-
-**When to use Streaming Transcription:**
-- ✅ True real-time applications (live phone calls, voice assistants)
-- ✅ Very low latency requirements (<200ms)
-- ✅ Continuous audio streams
-- ⚠️ More complex connection management
-- ⚠️ Requires handling interim results and reconnections
-- ⚠️ Provider-specific implementation differences
-
-```python
-async def compare_approaches():
-    config = DebabelizerConfig({"deepgram": {"api_key": "your_key"}})
-    processor = VoiceProcessor(stt_provider="deepgram", config=config)
-    
-    # Chunk approach (recommended for web apps)
-    with open("audio_chunk.webm", "rb") as f:
-        chunk_data = f.read()
-    
-    # This is the most reliable approach for web applications
-    chunk_result = await processor.transcribe_audio(
-        audio_data=chunk_data,
-        audio_format="webm",  # From browser MediaRecorder
-        sample_rate=48000,    # Browser standard
-        language="en"
-    )
-    print(f"Chunk: {chunk_result.text}")
-    
-    # Streaming approach (for specialized real-time applications)
-    session_id = await processor.start_streaming_transcription(
-        audio_format="pcm",   # Raw PCM preferred for streaming
-        sample_rate=16000,
-        language="en"
-    )
-    
-    # Stream in small chunks for real-time processing
-    chunk_size = 512  # Small chunks for low latency
-    with open("audio.wav", "rb") as f:
-        while chunk := f.read(chunk_size):
-            await processor.stream_audio(session_id, chunk)
-    
-    async for result in processor.get_streaming_results(session_id):
-        if result.is_final:
-            print(f"Stream: {result.text}")
-            break
-    
-    await processor.stop_streaming_transcription(session_id)
-```
 
 ### Provider-Specific Optimizations
 
