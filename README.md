@@ -503,7 +503,9 @@ python -m pytest tests/test_integration.py
 python -m pytest --cov=debabelizer --cov-report=html
 ```
 
-### Test Your Provider Setup
+### Test Results
+Current test status: **150/165 tests passing, 15 skipped** ✅
+
 ```bash
 # Test specific providers (requires API keys in .env)
 python tests/test_openai_tts.py      # OpenAI TTS (tested ✅)

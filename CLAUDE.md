@@ -309,8 +309,8 @@ whisper:
 - **STT configuration tests**: 4/4 passing ✅  
 - **VoiceProcessor tests**: 21/21 passing ✅
 - **SessionManager tests**: 12/12 passing ✅
-- **Overall unit tests**: 89/120 passing (excellent improvement)
-- **Only 2 minor format detection tests failing** (non-critical utilities)
+- **Overall unit tests**: 150/165 passing (15 tests skipped) ✅
+- **Only 0 tests failing** - all critical functionality working
 
 ## Installation Instructions
 

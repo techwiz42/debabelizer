@@ -76,7 +76,8 @@ class TestSTTProviderInterface:
             )
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'), \
+                 patch('pathlib.Path.exists', return_value=True):
                 result = await processor.transcribe_file("test_audio.wav")
                 
                 # Test interface contract
@@ -116,7 +117,8 @@ class TestSTTProviderInterface:
                 )
                 
                 with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'), \
+                     patch('pathlib.Path.exists', return_value=True):
                     result = await processor.transcribe_file(
                         f"{lang_name}_sample.wav", 
                         language=lang_code
@@ -156,7 +158,8 @@ class TestSTTProviderInterface:
                 )
                 
                 with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'), \
+                     patch('pathlib.Path.exists', return_value=True):
                     # Don't specify language - test auto-detection
                     result = await processor.transcribe_file(f"{lang_name}_sample.wav")
                     
@@ -359,7 +362,8 @@ class TestSTTProviderInterface:
             )
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'), \
+                 patch('pathlib.Path.exists', return_value=True):
                 result = await processor.transcribe_file("test.wav")
                 
                 # Test required fields
@@ -404,7 +408,8 @@ class TestSTTProviderInterface:
             mock_provider.transcribe_file.side_effect = mock_responses
             
             with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'):
+                 patch('debabelizer.utils.formats.detect_audio_format', return_value='wav'), \
+                 patch('pathlib.Path.exists', return_value=True):
                 # Start multiple concurrent transcriptions
                 tasks = [
                     processor.transcribe_file(f"file_{i}.wav")
@@ -443,7 +448,8 @@ class TestSTTProviderInterface:
                 )
                 
                 with patch.object(processor, '_get_stt_provider', return_value=mock_provider), \
-                     patch('debabelizer.utils.formats.detect_audio_format', return_value=audio_format):
+                     patch('debabelizer.utils.formats.detect_audio_format', return_value=audio_format), \
+                     patch('pathlib.Path.exists', return_value=True):
                     result = await processor.transcribe_file(f"test.{audio_format}")
                     
                     assert audio_format in result.text
