@@ -314,7 +314,7 @@ SONIOX_API_KEY=your_soniox_key
 
 | Provider | Status | Streaming | Language Auto-Detection | Testing | Authentication | Best For |
 |----------|--------|-----------|-------------------------|---------|----------------|----------|
-| **Soniox** | ✅ **Verified** | True WebSocket streaming | ❓ **Unverified** | ✅ **Tested & Fixed** | API Key | Real-time applications |
+| **Soniox** | ✅ **Verified** | True WebSocket streaming | ✅  **Verified** | ✅ **Tested & Fixed** | API Key | Real-time applications |
 | **Deepgram** | ✅ **Verified** | True WebSocket streaming | ✅ **Claimed** | ✅ **Tested & Fixed** | API Key | High accuracy & speed |
 | **Google Cloud** | ✅ **Code Fixed** | Session-based streaming | ⚠️ **Limited** | ⚠️ **Needs Auth Setup** | Service Account JSON | Enterprise features |
 | **Azure** | ✅ **Code Fixed** | Session-based streaming | ✅ **Claimed** | ⚠️ **Needs Auth Setup** | API Key + Region | Microsoft ecosystem |
