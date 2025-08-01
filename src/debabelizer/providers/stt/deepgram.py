@@ -480,6 +480,15 @@ class DeepgramSTTProvider(STTProvider):
                     await asyncio.sleep(0.1)
                     if session_id in self._streaming_sessions and self._streaming_sessions[session_id]["connected"]:
                         logger.info(f"Started Deepgram streaming session: {session_id}")
+                        
+                        # Send keepalive message immediately after connection to prevent timeout
+                        try:
+                            keepalive_message = json.dumps({"type": "KeepAlive"})
+                            self._streaming_sessions[session_id]["connection"].send(keepalive_message)
+                            logger.info(f"Sent keepalive message to session {session_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to send keepalive to session {session_id}: {e}")
+                        
                         return session_id
                     if session_id in self._streaming_sessions and self._streaming_sessions[session_id]["error"]:
                         error = self._streaming_sessions[session_id]["error"]
@@ -518,6 +527,25 @@ class DeepgramSTTProvider(STTProvider):
             
         except Exception as e:
             raise ProviderError(f"Failed to send audio to session {session_id}: {e}", "deepgram")
+    
+    async def send_keepalive(self, session_id: str) -> None:
+        """Send keepalive message to prevent Deepgram timeout"""
+        
+        if not hasattr(self, '_streaming_sessions') or session_id not in self._streaming_sessions:
+            raise ProviderError(f"Streaming session {session_id} not found", "deepgram")
+            
+        session = self._streaming_sessions[session_id]
+        
+        if not session["connected"]:
+            return
+            
+        try:
+            # Send keepalive message as JSON
+            keepalive_message = json.dumps({"type": "KeepAlive"})
+            session["connection"].send(keepalive_message)
+            
+        except Exception as e:
+            logger.error(f"Failed to send keepalive message to session {session_id}: {e}")
     
     async def finalize_streaming(self, session_id: str) -> None:
         """Send finalize message to get final transcription results"""
