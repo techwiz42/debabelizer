@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "debabelizer"
-version = "0.010"
+version = "0.1.0b1"
 description = "Universal Voice Processing Library - Breaking Down Language Barriers"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Thanotopolis Team", email = "team@thanotopolis.com"},
+    {name = "Peter Sisk", email = "pete@cyberiad.ai"},
 ]
 maintainers = [
-    {name = "Thanotopolis Team", email = "team@thanotopolis.com"},
+    {name = "Peter Sisk", email = "pete@cyberiad.ai"},
 ]
 keywords = ["speech", "voice", "transcription", "synthesis", "stt", "tts", "ai", "ml"]
 classifiers = [
@@ -77,10 +77,10 @@ test = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/thanotopolis/debabelizer"
-"Bug Tracker" = "https://github.com/thanotopolis/debabelizer/issues"
-"Documentation" = "https://github.com/thanotopolis/debabelizer#readme"
-"Source Code" = "https://github.com/thanotopolis/debabelizer"
+"Homepage" = "https://debabelize.me"
+"Bug Tracker" = "https://github.com/techwiz42/debabelizer/issues"
+"Documentation" = "https://github.com/techwiz42/debabelizer#readme"
+"Source Code" = "https://github.com/techwiz/debabelizer"
 
 [project.scripts]
 debabelizer = "debabelizer.cli:main"
