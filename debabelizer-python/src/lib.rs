@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::{create_exception, PyResult};
+use pyo3::{create_exception, PyResult, Bound};
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
@@ -62,7 +62,7 @@ pub struct PyAudioData {
 #[pymethods]
 impl PyAudioData {
     #[new]
-    fn new(data: &PyBytes, format: PyAudioFormat) -> Self {
+    fn new(data: &Bound<'_, PyBytes>, format: PyAudioFormat) -> Self {
         Self {
             inner: AudioData {
                 data: data.as_bytes().to_vec(),
@@ -73,7 +73,7 @@ impl PyAudioData {
 
     #[getter]
     fn data(&self, py: Python) -> PyObject {
-        PyBytes::new(py, &self.inner.data).into()
+        PyBytes::new_bound(py, &self.inner.data).into()
     }
 
     #[getter]
@@ -200,7 +200,7 @@ pub struct PySynthesisResult {
 impl PySynthesisResult {
     #[getter]
     fn audio_data(&self, py: Python) -> PyObject {
-        PyBytes::new(py, &self.inner.audio_data).into()
+        PyBytes::new_bound(py, &self.inner.audio_data).into()
     }
 
     #[getter]
@@ -323,7 +323,7 @@ impl PyVoiceProcessor {
     #[new]
     #[pyo3(signature = (config=None, stt_provider=None, tts_provider=None))]
     fn new(
-        config: Option<&PyDict>,
+        config: Option<&Bound<'_, PyDict>>,
         stt_provider: Option<String>,
         tts_provider: Option<String>,
     ) -> PyResult<Self> {
@@ -335,7 +335,7 @@ impl PyVoiceProcessor {
                 .iter()
                 .map(|(k, v)| {
                     let key = k.to_string();
-                    let value = python_to_serde_value(v).unwrap_or(Value::Null);
+                    let value = python_to_serde_value(&v).unwrap_or(Value::Null);
                     (key, value)
                 })
                 .collect();
@@ -396,7 +396,7 @@ impl PyVoiceProcessor {
 
     /// Get available voices for TTS
     fn get_available_voices(&self) -> PyResult<Vec<PyVoice>> {
-        let processor = self.inner.clone();
+        let _processor = self.inner.clone();
         
         let voices = self.runtime.block_on(async {
             // For now, return a basic set of voices since the actual implementation might not have this method
@@ -417,7 +417,7 @@ impl PyVoiceProcessor {
 }
 
 /// Convert Python object to serde_json::Value
-fn python_to_serde_value(obj: &PyAny) -> PyResult<Value> {
+fn python_to_serde_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if obj.is_none() {
         Ok(Value::Null)
     } else if let Ok(b) = obj.extract::<bool>() {
@@ -432,7 +432,7 @@ fn python_to_serde_value(obj: &PyAny) -> PyResult<Value> {
         let mut map = serde_json::Map::new();
         for (k, v) in dict.iter() {
             let key = k.to_string();
-            let value = python_to_serde_value(v)?;
+            let value = python_to_serde_value(&v)?;
             map.insert(key, value);
         }
         Ok(Value::Object(map))
@@ -441,12 +441,11 @@ fn python_to_serde_value(obj: &PyAny) -> PyResult<Value> {
     }
 }
 
-/// Custom exception for Debabelizer errors
 create_exception!(debabelizer_python, DebabelizerException, PyRuntimeError);
 
 /// Python module definition
 #[pymodule]
-fn _debabelizer(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _debabelizer(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAudioFormat>()?;
     m.add_class::<PyAudioData>()?;
     m.add_class::<PyWordTiming>()?;
@@ -455,6 +454,6 @@ fn _debabelizer(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PySynthesisResult>()?;
     m.add_class::<PySynthesisOptions>()?;
     m.add_class::<PyVoiceProcessor>()?;
-    m.add("DebabelizerException", _py.get_type::<DebabelizerException>())?;
+    m.add("DebabelizerException", _py.get_type_bound::<DebabelizerException>())?;
     Ok(())
 }

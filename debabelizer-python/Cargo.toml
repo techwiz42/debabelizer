@@ -20,8 +20,8 @@ debabelizer = { path = "../debabelizer", features = ["soniox", "elevenlabs", "op
 debabelizer-core = { path = "../debabelizer-core" }
 
 # PyO3 for Python bindings
-pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38", "chrono"] }
-pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38", "chrono"] }
+pyo3-asyncio-0-21 = { version = "0.21", features = ["tokio-runtime"] }
 
 # Core async runtime
 tokio = { workspace = true }
@@ -34,4 +34,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [build-dependencies]
-pyo3-build-config = "0.20"
+pyo3-build-config = "0.21"
