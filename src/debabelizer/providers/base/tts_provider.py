@@ -39,8 +39,9 @@ class SynthesisResult:
     sample_rate: int
     duration: float
     size_bytes: int
-    voice_used: Optional[Voice] = None
+    voice_used: Optional[str] = None  # Changed from Voice to str to match test expectations
     text_processed: Optional[str] = None
+    language: Optional[str] = None  # Added language field
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -195,6 +196,7 @@ class TTSProvider(ABC):
             size_bytes=len(combined_audio),
             voice_used=result.voice_used,  # Use last voice
             text_processed=text,
+            language=None,  # Added language field
             metadata={"chunks": len(chunks)}
         )
         

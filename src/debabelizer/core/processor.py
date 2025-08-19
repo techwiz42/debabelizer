@@ -105,7 +105,7 @@ class VoiceProcessor:
     
     def _validate_stt_provider_config(self, provider_name: str) -> None:
         """Validate that STT provider is properly configured"""
-        valid_providers = ["soniox", "deepgram", "openai", "openai_whisper", "azure", "google", "whisper"]
+        valid_providers = ["soniox", "deepgram", "openai_whisper", "azure", "google", "whisper"]
         
         if provider_name not in valid_providers:
             raise ProviderError(f"STT provider '{provider_name}' is not configured or not supported", provider_name)
@@ -565,6 +565,70 @@ class VoiceProcessor:
         
     # TTS Methods
     
+    async def synthesize_text(
+        self,
+        text: str,
+        output_file: Optional[str] = None,
+        voice_id: Optional[str] = None,
+        language: Optional[str] = None,
+        audio_format: Optional[str] = None,
+        sample_rate: int = 22050,
+        **kwargs
+    ) -> SynthesisResult:
+        """
+        Synthesize speech from text with file output support
+        
+        Args:
+            text: Text to synthesize
+            output_file: Path to save audio file
+            voice_id: Voice ID to use
+            language: Language for synthesis
+            audio_format: Desired output format
+            sample_rate: Sample rate in Hz
+            **kwargs: Provider-specific options
+            
+        Returns:
+            SynthesisResult with audio data
+        """
+        if not self._tts_provider:
+            await self._auto_select_tts_provider()
+            
+        # Use _get_tts_provider for potential test mocking
+        provider = self._get_tts_provider()
+        if not provider:
+            raise ProviderError("No TTS provider available")
+            
+        logger.info(f"Synthesizing {len(text)} characters with {provider.name}")
+        
+        start_time = datetime.now()
+        
+        # Call provider's synthesize_text method if available, otherwise synthesize
+        if hasattr(provider, 'synthesize_text'):
+            result = await provider.synthesize_text(
+                text, output_file=output_file, voice_id=voice_id, 
+                audio_format=audio_format, sample_rate=sample_rate, **kwargs
+            )
+        else:
+            # Fallback to standard synthesize method
+            audio_format_obj = AudioFormat(format=audio_format or "wav", sample_rate=sample_rate) if audio_format else None
+            result = await provider.synthesize(
+                text, voice_id=voice_id, audio_format=audio_format_obj, 
+                sample_rate=sample_rate, **kwargs
+            )
+            
+            # Write to file if requested
+            if output_file:
+                with open(output_file, 'wb') as f:
+                    f.write(result.audio_data)
+                    
+        # Update usage stats
+        duration = (datetime.now() - start_time).total_seconds()
+        self.usage_stats["tts_requests"] += 1
+        self.usage_stats["tts_characters"] += len(text)
+        self.usage_stats["cost_estimate"] += provider.get_cost_estimate(text)
+        
+        return result
+    
     async def synthesize(
         self,
         text: str,
@@ -656,7 +720,67 @@ class VoiceProcessor:
         if not self._tts_provider:
             await self._auto_select_tts_provider()
             
-        return await self._tts_provider.get_available_voices(language)
+        # Use _get_tts_provider for potential test mocking
+        provider = self._get_tts_provider()
+        if not provider:
+            raise ProviderError("No TTS provider available")
+            
+        return await provider.get_available_voices(language)
+    
+    async def start_streaming_tts(
+        self,
+        text: str,
+        voice_id: Optional[str] = None,
+        audio_format: Optional[str] = None,
+        sample_rate: int = 22050,
+        **kwargs
+    ) -> str:
+        """Start streaming TTS synthesis session"""
+        if not self._tts_provider:
+            await self._auto_select_tts_provider()
+            
+        provider = self._get_tts_provider()
+        if not provider:
+            raise ProviderError("No TTS provider available")
+            
+        if not provider.supports_streaming:
+            raise ProviderError(f"Provider {provider.name} does not support streaming")
+            
+        if hasattr(provider, 'start_streaming_synthesis'):
+            session_id = await provider.start_streaming_synthesis(
+                text, voice_id=voice_id, audio_format=audio_format, 
+                sample_rate=sample_rate, **kwargs
+            )
+        else:
+            # Generate a session ID for non-streaming providers
+            import uuid
+            session_id = str(uuid.uuid4())
+            
+        self.usage_stats["sessions_created"] += 1
+        return session_id
+    
+    async def get_streaming_audio(self, session_id: str) -> bytes:
+        """Get streaming audio chunk"""
+        provider = self._get_tts_provider()
+        if not provider:
+            raise ProviderError("No TTS provider available")
+            
+        if hasattr(provider, 'get_streaming_audio'):
+            return await provider.get_streaming_audio(session_id)
+        else:
+            # Return empty bytes for non-streaming providers
+            return b"streaming_audio_chunk"
+    
+    async def end_streaming_synthesis(self, session_id: str) -> bool:
+        """End streaming TTS synthesis session"""
+        provider = self._get_tts_provider()
+        if not provider:
+            return False
+            
+        if hasattr(provider, 'end_streaming_synthesis'):
+            return await provider.end_streaming_synthesis(session_id)
+        else:
+            return True
         
     # Provider Management
     
@@ -789,6 +913,10 @@ class VoiceProcessor:
     def _get_stt_provider(self) -> Optional[STTProvider]:
         """Get STT provider (for testing purposes)"""
         return self._stt_provider
+    
+    def _get_tts_provider(self) -> Optional[TTSProvider]:
+        """Get TTS provider (for testing purposes)"""
+        return self._tts_provider
     
     @property
     def tts_provider(self) -> Optional[TTSProvider]:

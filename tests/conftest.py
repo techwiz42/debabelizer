@@ -58,10 +58,12 @@ def test_config():
 def temp_audio_file():
     """Create a temporary audio file for testing"""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-        # Create a minimal WAV file header
+        # Create a minimal WAV file header (0.2 seconds of audio for OpenAI compatibility)
+        data_size = 6400  # 0.2 seconds * 16000 Hz * 2 bytes = 6400 bytes
+        file_size = 36 + data_size  # Header is 44 bytes, data is remaining
         wav_header = (
             b'RIFF'
-            + (44).to_bytes(4, byteorder='little')
+            + file_size.to_bytes(4, byteorder='little')
             + b'WAVE'
             + b'fmt '
             + (16).to_bytes(4, byteorder='little')
@@ -72,10 +74,10 @@ def temp_audio_file():
             + (2).to_bytes(2, byteorder='little')   # Block align
             + (16).to_bytes(2, byteorder='little')  # 16-bit
             + b'data'
-            + (1000).to_bytes(4, byteorder='little')  # Data size
+            + data_size.to_bytes(4, byteorder='little')  # Data size
         )
         
-        tmp_file.write(wav_header + b'\x00' * 1000)  # Add some silence
+        tmp_file.write(wav_header + b'\x00' * data_size)  # Add 0.2 seconds of silence
         tmp_file.flush()
         
         yield Path(tmp_file.name)

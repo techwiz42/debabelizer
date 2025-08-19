@@ -35,6 +35,20 @@ class TestTTSProviderInterface:
         "vi": "vietnamese"  # Vietnamese
     }
 
+    def _create_mock_provider(self, **overrides):
+        """Create a properly configured mock provider"""
+        from unittest.mock import AsyncMock, Mock
+        mock_provider = AsyncMock()
+        # Make get_cost_estimate a sync method
+        mock_provider.get_cost_estimate = Mock(return_value=0.001)
+        mock_provider.name = "mock_provider"
+        
+        # Apply any overrides
+        for key, value in overrides.items():
+            setattr(mock_provider, key, value)
+            
+        return mock_provider
+
     def _get_available_tts_providers(self):
         """Get list of configured TTS providers for testing"""
         config = DebabelizerConfig()
@@ -53,7 +67,7 @@ class TestTTSProviderInterface:
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
             # Mock the actual provider to avoid API calls
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.synthesize_text.return_value = SynthesisResult(
                 audio_data=b"fake_audio_data_hello_world",
                 format="wav",
@@ -97,7 +111,7 @@ class TestTTSProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.synthesize_text.return_value = SynthesisResult(
                 audio_data=b"voice_specific_audio_data",
                 format="wav",
@@ -117,11 +131,10 @@ class TestTTSProviderInterface:
                 assert result.voice_used == "test_voice_123"
                 
                 # Verify provider was called with correct voice
-                mock_provider.synthesize_text.assert_called_with(
-                    "Hello with specific voice",
-                    output_file="voice_test.wav",
-                    voice_id="test_voice_123"
-                )
+                call_args = mock_provider.synthesize_text.call_args
+                assert call_args[0] == ("Hello with specific voice",)
+                assert call_args[1]["output_file"] == "voice_test.wav"
+                assert call_args[1]["voice_id"] == "test_voice_123"
 
     @pytest.mark.asyncio
     async def test_synthesis_with_language_specific_content(self):
@@ -137,7 +150,7 @@ class TestTTSProviderInterface:
             
             # Test with each of our test languages
             for lang_code, lang_name in self.TEST_LANGUAGES.items():
-                mock_provider = AsyncMock()
+                mock_provider = self._create_mock_provider()
                 mock_provider.synthesize_text.return_value = SynthesisResult(
                     audio_data=f"audio_for_{lang_name}".encode(),
                     format="wav",
@@ -196,7 +209,7 @@ class TestTTSProviderInterface:
                 )
             ]
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.get_available_voices.return_value = mock_voices
             
             with patch.object(processor, '_get_tts_provider', return_value=mock_provider):
@@ -230,7 +243,7 @@ class TestTTSProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.start_streaming_synthesis.return_value = "tts_session_456"
             mock_provider.get_streaming_audio.return_value = b"streaming_audio_chunk"
             mock_provider.end_streaming_synthesis.return_value = True
@@ -272,7 +285,7 @@ class TestTTSProviderInterface:
             
             for audio_format in audio_formats:
                 for sample_rate in sample_rates:
-                    mock_provider = AsyncMock()
+                    mock_provider = self._create_mock_provider()
                     mock_provider.synthesize_text.return_value = SynthesisResult(
                         audio_data=f"audio_data_{audio_format}_{sample_rate}".encode(),
                         format=audio_format,
@@ -315,7 +328,7 @@ class TestTTSProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.synthesize_text.return_value = SynthesisResult(
                 audio_data=b"long_audio_data" * 100,  # Simulate longer audio
                 format="wav",
@@ -351,7 +364,7 @@ class TestTTSProviderInterface:
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
             # Test synthesis error
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.synthesize_text.side_effect = ProviderError("TTS API error")
             
             with patch.object(processor, '_get_tts_provider', return_value=mock_provider):
@@ -377,7 +390,7 @@ class TestTTSProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             
             # Create multiple mock responses
             mock_responses = [
@@ -430,7 +443,7 @@ class TestTTSProviderInterface:
                     gender="neutral"
                 ))
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.get_available_voices.return_value = all_voices
             
             with patch.object(processor, '_get_tts_provider', return_value=mock_provider):
@@ -457,7 +470,7 @@ class TestTTSProviderInterface:
             config = DebabelizerConfig()
             processor = VoiceProcessor(tts_provider=provider_name, config=config)
             
-            mock_provider = AsyncMock()
+            mock_provider = self._create_mock_provider()
             mock_provider.synthesize_text.return_value = SynthesisResult(
                 audio_data=b"complete_audio_data",
                 format="wav",

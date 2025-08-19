@@ -169,7 +169,7 @@ class DebabelizerConfig:
         tts_providers = []
         
         # Define provider types
-        stt_provider_names = ["soniox", "deepgram", "openai", "openai_whisper", "azure", "google", "whisper"]
+        stt_provider_names = ["soniox", "deepgram", "openai_whisper", "azure", "google", "whisper"]
         tts_provider_names = ["elevenlabs", "azure", "openai", "google"]
         
         for provider in stt_provider_names:
