@@ -1,0 +1,52 @@
+[package]
+name = "debabelizer"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Universal voice processing library with support for multiple STT/TTS providers"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+debabelizer-core = { path = "../debabelizer-core" }
+debabelizer-utils = { path = "../debabelizer-utils" }
+
+# Core dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Configuration
+config = { version = "0.14", features = ["toml", "json", "yaml"] }
+envy = "0.4"
+dirs = "5.0"
+
+# Optional provider dependencies
+debabelizer-soniox = { path = "../providers/soniox", optional = true }
+debabelizer-elevenlabs = { path = "../providers/elevenlabs", optional = true }
+debabelizer-openai = { path = "../providers/openai", optional = true }
+debabelizer-deepgram = { path = "../providers/deepgram", optional = true }
+
+[features]
+default = ["soniox", "elevenlabs", "openai", "deepgram"]
+soniox = ["dep:debabelizer-soniox"]
+elevenlabs = ["dep:debabelizer-elevenlabs"]
+openai = ["dep:debabelizer-openai"]
+deepgram = ["dep:debabelizer-deepgram"]
+all-providers = ["soniox", "elevenlabs", "openai", "deepgram"]
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+tempfile = "3.12"

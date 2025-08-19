@@ -1,0 +1,27 @@
+[package]
+name = "debabelizer-elevenlabs"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/debabelizer-elevenlabs"
+description = "ElevenLabs TTS provider for Debabelizer"
+
+[dependencies]
+debabelizer-core = { path = "../../debabelizer-core" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }

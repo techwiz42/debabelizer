@@ -1,0 +1,44 @@
+[package]
+name = "debabelizer-whisper"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/debabelizer-whisper"
+description = "OpenAI Whisper local STT provider for Debabelizer voice processing library"
+keywords = ["whisper", "openai", "stt", "speech", "local"]
+categories = ["multimedia::audio", "api-bindings"]
+
+[dependencies]
+debabelizer-core = { path = "../../debabelizer-core" }
+
+# Core dependencies
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# HTTP client for model downloads
+reqwest = { workspace = true }
+
+# Audio processing
+hound = "3.5"
+tempfile = "3.12"
+dirs = "5.0"
+
+# Note: In a real implementation, you would add Whisper model dependencies like:
+# candle-core, candle-transformers, tokenizers, etc.
+# For this demo, we're using a simplified simulation
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+tempfile = "3.12"

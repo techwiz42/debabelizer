@@ -1,0 +1,39 @@
+[package]
+name = "debabelizer-google"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/debabelizer-google"
+description = "Google Cloud STT & TTS provider for Debabelizer voice processing library"
+keywords = ["google", "gcp", "stt", "tts", "speech"]
+categories = ["multimedia::audio", "api-bindings"]
+
+[dependencies]
+debabelizer-core = { path = "../../debabelizer-core" }
+
+# Core dependencies
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# HTTP client dependencies for Google Cloud
+reqwest = { workspace = true }
+
+# Additional Google Cloud API dependencies
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+wiremock = "0.6"
+tempfile = "3.12"

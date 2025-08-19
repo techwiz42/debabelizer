@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "debabelizer",
+    "debabelizer-core", 
+    "debabelizer-utils",
+    "debabelizer-python",
+    "providers/soniox",
+    "providers/elevenlabs",
+    "providers/openai",
+    "providers/deepgram",
+    "providers/google",
+    "providers/azure",
+    "providers/whisper",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Debabelizer Contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/techwiz42/debabelizer"
+homepage = "https://github.com/techwiz42/debabelizer"
+documentation = "https://docs.rs/debabelizer"
+keywords = ["voice", "speech", "stt", "tts", "transcription"]
+categories = ["multimedia::audio", "api-bindings", "asynchronous"]
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+bytes = "1.7"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-tungstenite = "0.24"
+url = "2.5"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Testing dependencies
+mockall = "0.13"
+tokio-test = "0.4"
