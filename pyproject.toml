@@ -85,10 +85,10 @@ test = [
 debabelizer = "debabelizer.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "python-legacy"}
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["python-legacy"]
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"], content-type = "text/markdown"}
@@ -151,7 +151,7 @@ module = "tests.*"
 ignore_errors = true
 
 [tool.coverage.run]
-source = ["src/debabelizer"]
+source = ["python-legacy/debabelizer"]
 omit = ["*/tests/*", "*/test_*.py"]
 
 [tool.coverage.report]

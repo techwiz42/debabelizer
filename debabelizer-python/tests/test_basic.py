@@ -1,243 +1,180 @@
-"""Basic tests for Debabelizer Python bindings."""
-
+"""
+Basic tests for the new Python wrapper around the Rust debabelizer
+"""
 import pytest
 import debabelizer
-from unittest.mock import patch
 
 
-class TestAudioFormat:
-    """Test AudioFormat class."""
+def test_imports():
+    """Test that all expected classes can be imported"""
+    # Test the main classes are available
+    assert hasattr(debabelizer, 'VoiceProcessor')
+    assert hasattr(debabelizer, 'DebabelizerConfig')
+    assert hasattr(debabelizer, 'AudioFormat')
+    assert hasattr(debabelizer, 'Voice')
+    assert hasattr(debabelizer, 'TranscriptionResult')
+    assert hasattr(debabelizer, 'SynthesisResult')
+    assert hasattr(debabelizer, 'StreamingResult')
+    assert hasattr(debabelizer, 'WordTiming')
     
-    def test_create_audio_format(self):
-        """Test creating AudioFormat instance."""
-        format_obj = debabelizer.AudioFormat(
-            format="wav",
-            sample_rate=16000,
-            channels=1,
-            bit_depth=16
-        )
-        
-        assert format_obj.format == "wav"
-        assert format_obj.sample_rate == 16000
-        assert format_obj.channels == 1
-        assert format_obj.bit_depth == 16
+    # Test exception classes are available
+    assert hasattr(debabelizer, 'ProviderError')
+    assert hasattr(debabelizer, 'AuthenticationError')
+    assert hasattr(debabelizer, 'RateLimitError')
+    assert hasattr(debabelizer, 'ConfigurationError')
+    
+    # Test convenience function is available
+    assert hasattr(debabelizer, 'create_processor')
 
 
-class TestAudioData:
-    """Test AudioData class."""
-    
-    def test_create_audio_data(self):
-        """Test creating AudioData instance."""
-        audio_format = debabelizer.AudioFormat("wav", 16000, 1, 16)
-        audio_data = debabelizer.AudioData(b"test_data", audio_format)
-        
-        assert audio_data.data == b"test_data"
-        assert audio_data.format.format == "wav"
+def test_audio_format_creation():
+    """Test AudioFormat creation matches original API"""
+    # Test basic creation
+    fmt = debabelizer.AudioFormat("wav", 16000)
+    assert fmt.format == "wav"
+    assert fmt.sample_rate == 16000
+    assert fmt.channels == 1
+    assert fmt.bit_depth == 16
+
+    # Test with all parameters
+    fmt2 = debabelizer.AudioFormat("mp3", 44100, 2, 24)
+    assert fmt2.format == "mp3"
+    assert fmt2.sample_rate == 44100
+    assert fmt2.channels == 2
+    assert fmt2.bit_depth == 24
 
 
-class TestSynthesisOptions:
-    """Test SynthesisOptions class."""
-    
-    def test_create_synthesis_options_empty(self):
-        """Test creating empty SynthesisOptions."""
-        options = debabelizer.SynthesisOptions()
-        
-        assert options.voice is None
-        assert options.speed is None
-        assert options.pitch is None
-        assert options.volume is None
-        assert options.format is None
-    
-    def test_create_synthesis_options_full(self):
-        """Test creating SynthesisOptions with all parameters."""
-        options = debabelizer.SynthesisOptions(
-            voice="alloy",
-            speed=1.2,
-            pitch=2.0,
-            volume=0.8,
-            format="mp3"
-        )
-        
-        assert options.voice == "alloy"
-        assert options.speed == 1.2
-        assert options.pitch == 2.0
-        assert options.volume == 0.8
-        assert options.format == "mp3"
-    
-    def test_modify_synthesis_options(self):
-        """Test modifying SynthesisOptions after creation."""
-        options = debabelizer.SynthesisOptions()
-        
-        options.voice = "nova"
-        options.speed = 1.5
-        
-        assert options.voice == "nova"
-        assert options.speed == 1.5
+def test_word_timing_creation():
+    """Test WordTiming creation matches original API"""
+    word = debabelizer.WordTiming("hello", 0.5, 1.0, 0.95)
+    assert word.word == "hello"
+    assert word.start_time == 0.5
+    assert word.end_time == 1.0
+    assert abs(word.confidence - 0.95) < 0.001  # Allow for floating point precision
 
 
-class TestVoiceProcessor:
-    """Test VoiceProcessor class."""
-    
-    def test_create_processor_no_config(self):
-        """Test creating processor without configuration."""
-        # This should work if environment variables are set or fail gracefully
-        try:
-            processor = debabelizer.VoiceProcessor()
-            # If successful, test basic functionality
-            assert hasattr(processor, 'has_stt_provider')
-            assert hasattr(processor, 'has_tts_provider')
-        except debabelizer.DebabelizerException:
-            # Expected if no configuration is available
-            pass
-    
-    def test_create_processor_with_config(self):
-        """Test creating processor with configuration."""
-        config = {
-            "preferences": {
-                "stt_provider": "deepgram",
-                "tts_provider": "openai"
-            },
-            "deepgram": {
-                "api_key": "test_key"
-            },
-            "openai": {
-                "api_key": "test_key"
-            }
-        }
-        
-        # This might fail due to invalid API keys, but should accept the config
-        try:
-            processor = debabelizer.VoiceProcessor(config=config)
-            assert hasattr(processor, 'has_stt_provider')
-        except debabelizer.DebabelizerException:
-            # Expected with invalid API keys
-            pass
-    
-    def test_create_processor_with_explicit_providers(self):
-        """Test creating processor with explicit provider selection."""
-        try:
-            processor = debabelizer.VoiceProcessor(
-                stt_provider="deepgram",
-                tts_provider="openai"
-            )
-            assert hasattr(processor, 'get_stt_provider_name')
-            assert hasattr(processor, 'get_tts_provider_name')
-        except debabelizer.DebabelizerException:
-            # Expected if providers can't be configured
-            pass
-    
-    def test_processor_methods_exist(self):
-        """Test that processor has expected methods."""
-        # Create a mock processor to test interface
-        try:
-            processor = debabelizer.VoiceProcessor()
-            
-            # Test method existence
-            assert callable(getattr(processor, 'transcribe', None))
-            assert callable(getattr(processor, 'synthesize', None))
-            assert callable(getattr(processor, 'get_available_voices', None))
-            assert callable(getattr(processor, 'has_stt_provider', None))
-            assert callable(getattr(processor, 'has_tts_provider', None))
-            assert callable(getattr(processor, 'get_stt_provider_name', None))
-            assert callable(getattr(processor, 'get_tts_provider_name', None))
-            
-        except debabelizer.DebabelizerException:
-            # If we can't create a processor, just test that the class exists
-            assert hasattr(debabelizer, 'VoiceProcessor')
+def test_voice_creation():
+    """Test Voice creation matches original API"""
+    voice = debabelizer.Voice(
+        voice_id="test-voice",
+        name="Test Voice",
+        language="en-US",
+        gender="female",
+        description="A test voice"
+    )
+    assert voice.voice_id == "test-voice"
+    assert voice.name == "Test Voice"
+    assert voice.language == "en-US"
+    assert voice.description == "A test voice"
 
 
-class TestExceptions:
-    """Test exception handling."""
+def test_config_creation():
+    """Test DebabelizerConfig creation"""
+    # Test empty config
+    config = debabelizer.DebabelizerConfig()
+    assert config is not None
     
-    def test_debabelizer_exception_exists(self):
-        """Test that DebabelizerException exists."""
-        assert hasattr(debabelizer, 'DebabelizerException')
-        assert issubclass(debabelizer.DebabelizerException, Exception)
-    
-    def test_raise_debabelizer_exception(self):
-        """Test raising DebabelizerException."""
-        with pytest.raises(debabelizer.DebabelizerException):
-            raise debabelizer.DebabelizerException("Test error")
+    # Test config with dict (would need to be implemented properly)
+    config_dict = {
+        "soniox": {"api_key": "test-key"},
+        "preferences": {"stt_provider": "soniox"}
+    }
+    config2 = debabelizer.DebabelizerConfig(config_dict)
+    assert config2 is not None
 
 
-class TestModuleStructure:
-    """Test module structure and imports."""
+def test_voice_processor_creation():
+    """Test VoiceProcessor creation matches original API"""
+    # Test basic creation
+    processor = debabelizer.VoiceProcessor()
+    assert processor is not None
     
-    def test_all_classes_imported(self):
-        """Test that all expected classes are available."""
-        expected_classes = [
-            'AudioFormat',
-            'AudioData',
-            'WordTiming',
-            'TranscriptionResult',
-            'Voice',
-            'SynthesisResult',
-            'SynthesisOptions',
-            'VoiceProcessor',
-            'DebabelizerException',
-        ]
-        
-        for class_name in expected_classes:
-            assert hasattr(debabelizer, class_name), f"Missing class: {class_name}"
+    # Test creation with providers
+    processor2 = debabelizer.VoiceProcessor(
+        stt_provider="soniox",
+        tts_provider="elevenlabs"
+    )
+    assert processor2 is not None
     
-    def test_module_metadata(self):
-        """Test module metadata."""
-        assert hasattr(debabelizer, '__version__')
-        assert hasattr(debabelizer, '__author__')
-        assert debabelizer.__version__ == "0.1.0"
+    # Test creation with config
+    config = debabelizer.DebabelizerConfig()
+    processor3 = debabelizer.VoiceProcessor(config=config)
+    assert processor3 is not None
 
 
-class TestUtils:
-    """Test utility functions."""
+def test_create_processor_convenience_function():
+    """Test the create_processor convenience function"""
+    processor = debabelizer.create_processor(
+        stt_provider="soniox",
+        tts_provider="elevenlabs"
+    )
+    assert processor is not None
+    assert isinstance(processor, debabelizer.VoiceProcessor)
+
+
+def test_voice_processor_methods_exist():
+    """Test that VoiceProcessor has all expected methods from original API"""
+    processor = debabelizer.VoiceProcessor()
     
-    def test_utils_import(self):
-        """Test that utils module can be imported."""
-        from debabelizer import utils
-        assert hasattr(utils, 'load_audio_file')
-        assert hasattr(utils, 'get_audio_format_from_extension')
-        assert hasattr(utils, 'create_config_from_env')
-        assert hasattr(utils, 'create_synthesis_options')
+    # Core transcription methods
+    assert hasattr(processor, 'transcribe_file')
+    assert hasattr(processor, 'transcribe_audio')
+    assert hasattr(processor, 'transcribe_chunk')
     
-    def test_get_audio_format_from_extension(self):
-        """Test audio format detection from file extension."""
-        from debabelizer.utils import get_audio_format_from_extension
-        
-        assert get_audio_format_from_extension("test.wav") == "wav"
-        assert get_audio_format_from_extension("test.mp3") == "mp3"
-        assert get_audio_format_from_extension("test.flac") == "flac"
-        assert get_audio_format_from_extension("/path/to/file.ogg") == "ogg"
+    # Core synthesis methods
+    assert hasattr(processor, 'synthesize')
+    assert hasattr(processor, 'synthesize_text')
     
-    def test_create_synthesis_options_util(self):
-        """Test utility function for creating synthesis options."""
-        from debabelizer.utils import create_synthesis_options
-        
-        options = create_synthesis_options(
-            voice="alloy",
-            speed=1.2,
-            format="mp3"
-        )
-        
-        assert isinstance(options, debabelizer.SynthesisOptions)
-        assert options.voice == "alloy"
-        assert options.speed == 1.2
-        assert options.format == "mp3"
+    # Streaming methods
+    assert hasattr(processor, 'start_streaming_transcription')
+    assert hasattr(processor, 'stream_audio')
+    assert hasattr(processor, 'stop_streaming_transcription')
     
-    @patch.dict('os.environ', {
-        'DEBABELIZER_STT_PROVIDER': 'deepgram',
-        'DEBABELIZER_TTS_PROVIDER': 'openai',
-        'DEEPGRAM_API_KEY': 'test_key',
-        'OPENAI_API_KEY': 'test_key'
-    })
-    def test_create_config_from_env(self):
-        """Test creating configuration from environment variables."""
-        from debabelizer.utils import create_config_from_env
-        
-        config = create_config_from_env()
-        
-        assert 'preferences' in config
-        assert config['preferences']['stt_provider'] == 'deepgram'
-        assert config['preferences']['tts_provider'] == 'openai'
-        assert 'deepgram' in config
-        assert config['deepgram']['api_key'] == 'test_key'
-        assert 'openai' in config
-        assert config['openai']['api_key'] == 'test_key'
+    # Provider management
+    assert hasattr(processor, 'set_stt_provider')
+    assert hasattr(processor, 'set_tts_provider')
+    assert hasattr(processor, 'get_available_voices')
+    
+    # Utility methods
+    assert hasattr(processor, 'get_usage_stats')
+    assert hasattr(processor, 'reset_usage_stats')
+    assert hasattr(processor, 'test_providers')
+    assert hasattr(processor, 'cleanup')
+    
+    # Properties
+    assert hasattr(processor, 'stt_provider_name')
+    assert hasattr(processor, 'tts_provider_name')
+
+
+def test_api_compatibility_with_original():
+    """Test that the API is compatible with the original Python module"""
+    # This test verifies that all the main exports match the original __all__ list
+    expected_exports = [
+        "VoiceProcessor",
+        "DebabelizerConfig", 
+        "STTProvider",
+        "TTSProvider",
+        "TranscriptionResult",
+        "SynthesisResult", 
+        "StreamingResult",
+        "Voice",
+        "AudioFormat",
+        "ProviderError",
+        "WordTiming",
+        "AuthenticationError",
+        "RateLimitError", 
+        "ConfigurationError",
+        "create_processor",
+    ]
+    
+    for export in expected_exports:
+        assert hasattr(debabelizer, export), f"Missing export: {export}"
+    
+    # Test that __all__ contains the expected exports
+    if hasattr(debabelizer, '__all__'):
+        for export in expected_exports:
+            assert export in debabelizer.__all__, f"Export {export} not in __all__"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__])

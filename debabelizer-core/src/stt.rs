@@ -75,6 +75,7 @@ pub struct StreamConfig {
     // Legacy/compatibility fields for test compatibility
     pub enable_word_time_offsets: bool,
     pub enable_automatic_punctuation: bool,
+    pub enable_language_identification: bool,
 }
 
 impl Default for StreamConfig {
@@ -91,6 +92,7 @@ impl Default for StreamConfig {
             metadata: None,
             enable_word_time_offsets: false,
             enable_automatic_punctuation: false,
+            enable_language_identification: false,
         }
     }
 }

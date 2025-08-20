@@ -1,56 +1,38 @@
-.PHONY: help build build-release install install-dev test test-release clean format lint check-all dev-install publish
+.PHONY: help build develop test clean lint format check-all
 
 help:
 	@echo "Available commands:"
-	@echo "  build         - Build the extension module in debug mode"
-	@echo "  build-release - Build the extension module in release mode"
-	@echo "  install       - Install in development mode"
-	@echo "  install-dev   - Install with development dependencies"
-	@echo "  test          - Run Python tests"
-	@echo "  test-release  - Run tests with release build"
-	@echo "  clean         - Clean build artifacts"
-	@echo "  format        - Format Python code with black"
-	@echo "  lint          - Lint Python code with ruff"
-	@echo "  check-all     - Run all checks (format, lint, test)"
-	@echo "  dev-install   - Full development setup"
-	@echo "  publish       - Publish to PyPI (requires authentication)"
+	@echo "  build     - Build the Python wheel"
+	@echo "  develop   - Install in development mode"
+	@echo "  test      - Run tests"
+	@echo "  clean     - Clean build artifacts"
+	@echo "  lint      - Run linting"
+	@echo "  format    - Format code"
+	@echo "  check-all - Run all checks (format, lint, test)"
 
 build:
+	maturin build --release
+
+develop:
 	maturin develop
 
-build-release:
-	maturin develop --release
-
-install: build
-
-install-dev: install
-	pip install -e ".[dev]"
-
 test:
-	pytest tests/ -v
-
-test-release: build-release test
+	python -m pytest tests/
 
 clean:
 	cargo clean
 	rm -rf target/
-	rm -rf dist/
-	rm -rf build/
+	rm -rf python/debabelizer.egg-info/
+	rm -rf python/debabelizer/__pycache__/
 	find . -name "*.pyc" -delete
-	find . -name "__pycache__" -delete
-
-format:
-	black python/ tests/ examples/
+	find . -name "__pycache__" -type d -exec rm -rf {} +
 
 lint:
-	ruff check python/ tests/ examples/
+	ruff check python/
 
-check-all: format lint test-release
+format:
+	black python/
+	ruff format python/
 
-dev-install: install-dev
-	@echo "Development environment setup complete!"
-	@echo "Run 'make test' to verify everything works."
-
-publish: build-release
-	maturin build --release
-	maturin publish
+check-all: format lint test
+	@echo "All checks passed!"

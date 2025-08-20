@@ -1,34 +1,47 @@
 """
-Debabelizer: Universal voice processing library with support for multiple STT/TTS providers
+Debabelizer - Universal Voice Processing Library
 
-This package provides a unified interface for Speech-to-Text (STT) and Text-to-Speech (TTS)
-services across multiple providers including OpenAI, Google Cloud, Azure, Deepgram, and more.
+Breaking down language barriers, one voice at a time.
 """
 
-from ._debabelizer import (
-    PyAudioFormat as AudioFormat,
-    PyAudioData as AudioData,
-    PyWordTiming as WordTiming,
-    PyTranscriptionResult as TranscriptionResult,
-    PyVoice as Voice,
-    PySynthesisResult as SynthesisResult,
-    PySynthesisOptions as SynthesisOptions,
-    PyVoiceProcessor as VoiceProcessor,
-    DebabelizerException,
+from ._internal import (
+    AudioFormat,
+    WordTiming,
+    TranscriptionResult,
+    Voice,
+    SynthesisResult,
+    StreamingResult,
+    DebabelizerConfig,
+    VoiceProcessor,
+    ProviderError,
+    AuthenticationError,
+    RateLimitError,
+    ConfigurationError,
+    create_processor,
 )
 
-__version__ = "0.1.0"
-__author__ = "Debabelizer Contributors"
-__email__ = "contributors@debabelizer.com"
+# Create aliases to match the original Python API exactly
+STTProvider = None  # Base class - not directly exposed in Rust bindings
+TTSProvider = None  # Base class - not directly exposed in Rust bindings
 
+# Version
+__version__ = "0.1.7"
+
+# Main exports - matching the original exactly
 __all__ = [
-    "AudioFormat",
-    "AudioData", 
-    "WordTiming",
-    "TranscriptionResult",
-    "Voice",
-    "SynthesisResult",
-    "SynthesisOptions",
     "VoiceProcessor",
-    "DebabelizerException",
+    "DebabelizerConfig", 
+    "STTProvider",
+    "TTSProvider",
+    "TranscriptionResult",
+    "SynthesisResult", 
+    "StreamingResult",
+    "Voice",
+    "AudioFormat",
+    "ProviderError",
+    # "WordTiming",  # Not exposed in legacy API at module level
+    "AuthenticationError",
+    "RateLimitError", 
+    "ConfigurationError",
+    "create_processor",
 ]

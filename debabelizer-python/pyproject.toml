@@ -5,17 +5,16 @@ build-backend = "maturin"
 [project]
 name = "debabelizer"
 description = "Universal voice processing library with support for multiple STT/TTS providers"
-authors = [
-    {name = "Debabelizer Contributors"}
-]
-license = {text = "MIT OR Apache-2.0"}
-readme = "README.md"
 requires-python = ">=3.8"
+authors = [
+    { name = "Debabelizer Contributors", email = "contributors@debabelizer.com" },
+]
+keywords = ["speech", "text-to-speech", "speech-to-text", "voice", "audio"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -24,15 +23,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Rust",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-keywords = ["voice", "speech", "stt", "tts", "transcription", "synthesis"]
-dependencies = []
-version = "0.1.0"
-
-[project.urls]
-Repository = "https://github.com/techwiz42/debabelizer"
-Documentation = "https://github.com/techwiz42/debabelizer/tree/rust/debabelizer-python"
+dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
@@ -42,21 +35,30 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/debabelizer/debabelizer"
+Documentation = "https://docs.debabelizer.com"
+Repository = "https://github.com/debabelizer/debabelizer.git"
+"Bug Tracker" = "https://github.com/debabelizer/debabelizer/issues"
+
 [tool.maturin]
 python-source = "python"
-module-name = "debabelizer._debabelizer"
+module-name = "debabelizer._internal"
 features = ["pyo3/extension-module"]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
 [tool.black]
-line-length = 100
+line-length = 88
 target-version = ['py38']
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py38"
-select = ["E", "F", "W", "I", "N", "UP", "YTT", "ANN", "S", "BLE", "B", "A", "C4", "DTZ", "T10", "EM", "ISC", "ICN", "G", "PIE", "T20", "PT", "Q", "RSE", "RET", "SLF", "SIM", "TID", "TCH", "ARG", "PTH", "ERA", "PGH", "PL", "TRY", "NPY", "RUF"]
-ignore = ["ANN101", "ANN102", "S101", "PLR0913"]
+select = ["E", "F", "W", "I"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"

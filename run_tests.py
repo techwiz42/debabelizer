@@ -90,7 +90,7 @@ def main():
     elif args.mode == "coverage":
         print("📊 Running Tests with Coverage Report")
         cmd = base_cmd + [
-            "--cov=src/debabelizer",
+            "--cov=python-legacy/debabelizer",
             "--cov-report=html",
             "--cov-report=term",
             "--cov-fail-under=80",

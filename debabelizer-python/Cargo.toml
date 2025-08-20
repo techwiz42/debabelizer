@@ -1,37 +1,24 @@
 [package]
 name = "debabelizer-python"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-description = "Python bindings for the Debabelizer universal voice processing library"
-keywords.workspace = true
-categories.workspace = true
+version = "0.1.8"
+edition = "2021"
 
 [lib]
-name = "debabelizer_python"
+name = "_internal"
 crate-type = ["cdylib"]
 
 [dependencies]
-debabelizer = { path = "../debabelizer", features = ["soniox", "elevenlabs", "openai", "deepgram"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+debabelizer = { path = "../debabelizer", features = ["default"] }
 debabelizer-core = { path = "../debabelizer-core" }
 
-# PyO3 for Python bindings
-pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38", "chrono"] }
-pyo3-asyncio-0-21 = { version = "0.21", features = ["tokio-runtime"] }
+# Core dependencies only for now
+# Provider dependencies would be added when needed
 
-# Core async runtime
-tokio = { workspace = true }
-async-trait = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-bytes = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-
-[build-dependencies]
-pyo3-build-config = "0.21"
+[features]
+default = []

@@ -473,7 +473,11 @@ class VoiceProcessor:
             raise ProviderError(f"Provider {provider.name} does not support streaming")
             
         session_id = await provider.start_streaming(
-            audio_format, sample_rate, language, language_hints, **kwargs
+            audio_format=audio_format, 
+            sample_rate=sample_rate, 
+            language=language, 
+            language_hints=language_hints, 
+            **kwargs
         )
         
         # Track session
