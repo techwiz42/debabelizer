@@ -65,11 +65,20 @@ pub async fn initialize_providers(config: &DebabelizerConfig) -> Result<Provider
     // Initialize Soniox (default STT)
     #[cfg(feature = "soniox")]
     {
+        println!("🔍 RUST: Checking for Soniox provider config...");
         if let Some(provider_config) = config.get_provider_config("soniox") {
+            println!("✅ RUST: Found Soniox provider config: {:?}", provider_config);
             let soniox_config = convert_to_soniox_config(provider_config);
+            println!("🚀 RUST: Creating Soniox provider...");
             if let Ok(provider) = debabelizer_soniox::SonioxProvider::new(&soniox_config).await {
+                println!("✅ RUST: Soniox provider created successfully, registering...");
                 registry.register_stt("soniox".to_string(), Arc::new(provider));
+                println!("✅ RUST: Soniox provider registered as 'soniox'");
+            } else {
+                println!("❌ RUST: Failed to create Soniox provider");
             }
+        } else {
+            println!("❌ RUST: No Soniox provider config found");
         }
     }
     
@@ -106,6 +115,61 @@ pub async fn initialize_providers(config: &DebabelizerConfig) -> Result<Provider
         }
     }
     
+    // Initialize Google Cloud STT
+    #[cfg(feature = "google")]
+    {
+        if let Some(provider_config) = config.get_provider_config("google") {
+            let google_config = convert_to_google_config(provider_config);
+            if let Ok(provider) = debabelizer_google::GoogleSttProvider::new(&google_config).await {
+                registry.register_stt("google".to_string(), Arc::new(provider));
+            }
+        }
+    }
+    
+    // Initialize Google Cloud TTS
+    #[cfg(feature = "google")]
+    {
+        if let Some(provider_config) = config.get_provider_config("google") {
+            let google_config = convert_to_google_config(provider_config);
+            if let Ok(provider) = debabelizer_google::GoogleTtsProvider::new(&google_config).await {
+                registry.register_tts("google".to_string(), Arc::new(provider));
+            }
+        }
+    }
+    
+    // Initialize Azure STT
+    #[cfg(feature = "azure")]
+    {
+        if let Some(provider_config) = config.get_provider_config("azure") {
+            let azure_config = convert_to_azure_config(provider_config);
+            if let Ok(provider) = debabelizer_azure::AzureSttProvider::new(&azure_config).await {
+                registry.register_stt("azure".to_string(), Arc::new(provider));
+            }
+        }
+    }
+    
+    // Initialize Azure TTS
+    #[cfg(feature = "azure")]
+    {
+        if let Some(provider_config) = config.get_provider_config("azure") {
+            let azure_config = convert_to_azure_config(provider_config);
+            if let Ok(provider) = debabelizer_azure::AzureTtsProvider::new(&azure_config).await {
+                registry.register_tts("azure".to_string(), Arc::new(provider));
+            }
+        }
+    }
+    
+    // Initialize Whisper STT (local)
+    #[cfg(feature = "whisper")]
+    {
+        if let Some(provider_config) = config.get_provider_config("whisper") {
+            let whisper_config = convert_to_whisper_config(provider_config);
+            if let Ok(provider) = debabelizer_whisper::WhisperSttProvider::new(&whisper_config).await {
+                registry.register_stt("whisper".to_string(), Arc::new(provider));
+            }
+        }
+    }
+    
     Ok(registry)
 }
 
@@ -114,24 +178,34 @@ pub fn select_stt_provider(
     config: &DebabelizerConfig,
     requested_provider: Option<&str>,
 ) -> Result<Arc<dyn SttProvider>> {
+    let (_, provider) = select_stt_provider_with_name(registry, config, requested_provider)?;
+    Ok(provider)
+}
+
+pub fn select_stt_provider_with_name(
+    registry: &ProviderRegistry,
+    config: &DebabelizerConfig,
+    requested_provider: Option<&str>,
+) -> Result<(String, Arc<dyn SttProvider>)> {
     // 1. Explicit provider request
     if let Some(name) = requested_provider {
         return registry
             .get_stt(name)
+            .map(|p| (name.to_string(), p))
             .ok_or_else(|| DebabelizerError::Configuration(format!("STT provider '{}' not found", name)));
     }
     
     // 2. User preference
     if let Some(name) = config.get_preferred_stt_provider() {
         if let Some(provider) = registry.get_stt(name) {
-            return Ok(provider);
+            return Ok((name.to_string(), provider));
         }
     }
     
     // 3. Auto-selection
     if config.is_auto_select_enabled() {
-        if let Some(provider) = auto_select_stt_provider(registry, config.get_optimization_strategy()) {
-            return Ok(provider);
+        if let Some((name, provider)) = auto_select_stt_provider_with_name(registry, config.get_optimization_strategy()) {
+            return Ok((name, provider));
         }
     }
     
@@ -139,7 +213,7 @@ pub fn select_stt_provider(
     registry
         .stt_providers
         .first()
-        .map(|(_, p)| p.clone())
+        .map(|(name, p)| (name.clone(), p.clone()))
         .ok_or_else(|| DebabelizerError::Configuration("No STT providers available".to_string()))
 }
 
@@ -148,24 +222,34 @@ pub fn select_tts_provider(
     config: &DebabelizerConfig,
     requested_provider: Option<&str>,
 ) -> Result<Arc<dyn TtsProvider>> {
+    let (_, provider) = select_tts_provider_with_name(registry, config, requested_provider)?;
+    Ok(provider)
+}
+
+pub fn select_tts_provider_with_name(
+    registry: &ProviderRegistry,
+    config: &DebabelizerConfig,
+    requested_provider: Option<&str>,
+) -> Result<(String, Arc<dyn TtsProvider>)> {
     // 1. Explicit provider request
     if let Some(name) = requested_provider {
         return registry
             .get_tts(name)
+            .map(|p| (name.to_string(), p))
             .ok_or_else(|| DebabelizerError::Configuration(format!("TTS provider '{}' not found", name)));
     }
     
     // 2. User preference
     if let Some(name) = config.get_preferred_tts_provider() {
         if let Some(provider) = registry.get_tts(name) {
-            return Ok(provider);
+            return Ok((name.to_string(), provider));
         }
     }
     
     // 3. Auto-selection
     if config.is_auto_select_enabled() {
-        if let Some(provider) = auto_select_tts_provider(registry, config.get_optimization_strategy()) {
-            return Ok(provider);
+        if let Some((name, provider)) = auto_select_tts_provider_with_name(registry, config.get_optimization_strategy()) {
+            return Ok((name, provider));
         }
     }
     
@@ -173,7 +257,7 @@ pub fn select_tts_provider(
     registry
         .tts_providers
         .first()
-        .map(|(_, p)| p.clone())
+        .map(|(name, p)| (name.clone(), p.clone()))
         .ok_or_else(|| DebabelizerError::Configuration("No TTS providers available".to_string()))
 }
 
@@ -181,6 +265,14 @@ fn auto_select_stt_provider(
     registry: &ProviderRegistry,
     strategy: OptimizationStrategy,
 ) -> Option<Arc<dyn SttProvider>> {
+    auto_select_stt_provider_with_name(registry, strategy)
+        .map(|(_, provider)| provider)
+}
+
+fn auto_select_stt_provider_with_name(
+    registry: &ProviderRegistry,
+    strategy: OptimizationStrategy,
+) -> Option<(String, Arc<dyn SttProvider>)> {
     // Simple strategy-based selection
     let preferred_order = match strategy {
         OptimizationStrategy::Cost => vec!["whisper", "deepgram", "google", "azure", "soniox"],
@@ -191,7 +283,7 @@ fn auto_select_stt_provider(
     
     for name in preferred_order {
         if let Some(provider) = registry.get_stt(name) {
-            return Some(provider);
+            return Some((name.to_string(), provider));
         }
     }
     
@@ -246,10 +338,54 @@ fn convert_to_openai_config(config: &crate::config::ProviderConfig) -> debabeliz
     }
 }
 
+#[cfg(feature = "google")]
+fn convert_to_google_config(config: &crate::config::ProviderConfig) -> debabelizer_google::ProviderConfig {
+    match config {
+        crate::config::ProviderConfig::Simple(map) => {
+            debabelizer_google::ProviderConfig::Simple(map.clone())
+        }
+        crate::config::ProviderConfig::Detailed { extra, .. } => {
+            debabelizer_google::ProviderConfig::Simple(extra.clone())
+        }
+    }
+}
+
+#[cfg(feature = "azure")]
+fn convert_to_azure_config(config: &crate::config::ProviderConfig) -> debabelizer_azure::ProviderConfig {
+    match config {
+        crate::config::ProviderConfig::Simple(map) => {
+            debabelizer_azure::ProviderConfig::Simple(map.clone())
+        }
+        crate::config::ProviderConfig::Detailed { extra, .. } => {
+            debabelizer_azure::ProviderConfig::Simple(extra.clone())
+        }
+    }
+}
+
+#[cfg(feature = "whisper")]
+fn convert_to_whisper_config(config: &crate::config::ProviderConfig) -> debabelizer_whisper::ProviderConfig {
+    match config {
+        crate::config::ProviderConfig::Simple(map) => {
+            debabelizer_whisper::ProviderConfig::Simple(map.clone())
+        }
+        crate::config::ProviderConfig::Detailed { extra, .. } => {
+            debabelizer_whisper::ProviderConfig::Simple(extra.clone())
+        }
+    }
+}
+
 fn auto_select_tts_provider(
     registry: &ProviderRegistry,
     strategy: OptimizationStrategy,
 ) -> Option<Arc<dyn TtsProvider>> {
+    auto_select_tts_provider_with_name(registry, strategy)
+        .map(|(_, provider)| provider)
+}
+
+fn auto_select_tts_provider_with_name(
+    registry: &ProviderRegistry,
+    strategy: OptimizationStrategy,
+) -> Option<(String, Arc<dyn TtsProvider>)> {
     // Simple strategy-based selection
     let preferred_order = match strategy {
         OptimizationStrategy::Cost => vec!["openai", "google", "azure", "elevenlabs"],
@@ -260,7 +396,7 @@ fn auto_select_tts_provider(
     
     for name in preferred_order {
         if let Some(provider) = registry.get_tts(name) {
-            return Some(provider);
+            return Some((name.to_string(), provider));
         }
     }
     

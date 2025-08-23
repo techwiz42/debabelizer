@@ -11,6 +11,7 @@ Features:
 import asyncio
 import json
 import logging
+import traceback
 import uuid
 import time
 from typing import AsyncGenerator, Dict, Any, Optional, List

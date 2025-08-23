@@ -2,7 +2,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::DebabelizerConfig;
-use crate::providers::{initialize_providers, select_stt_provider, select_tts_provider, ProviderRegistry};
+use crate::providers::{initialize_providers, select_stt_provider, select_tts_provider, 
+                      select_stt_provider_with_name, select_tts_provider_with_name, ProviderRegistry};
 use crate::session::SessionManager;
 use crate::Result;
 use debabelizer_core::{
@@ -19,6 +20,8 @@ pub struct VoiceProcessor {
     session_manager: SessionManager,
     selected_stt: Arc<RwLock<Option<Arc<dyn SttProvider>>>>,
     selected_tts: Arc<RwLock<Option<Arc<dyn TtsProvider>>>>,
+    selected_stt_name: Arc<RwLock<Option<String>>>,
+    selected_tts_name: Arc<RwLock<Option<String>>>,
 }
 
 impl VoiceProcessor {
@@ -33,6 +36,8 @@ impl VoiceProcessor {
             session_manager: SessionManager::new(),
             selected_stt: Arc::new(RwLock::new(None)),
             selected_tts: Arc::new(RwLock::new(None)),
+            selected_stt_name: Arc::new(RwLock::new(None)),
+            selected_tts_name: Arc::new(RwLock::new(None)),
         })
     }
     
@@ -41,10 +46,15 @@ impl VoiceProcessor {
     }
     
     async fn ensure_initialized(&self) -> Result<()> {
+        println!("🔍 RUST: ensure_initialized() called");
         let mut registry_guard = self.registry.write().await;
         if registry_guard.is_none() {
+            println!("🚀 RUST: Initializing providers for the first time...");
             let registry = initialize_providers(&self.config).await?;
+            println!("✅ RUST: Provider initialization completed successfully");
             *registry_guard = Some(registry);
+        } else {
+            println!("✅ RUST: Providers already initialized");
         }
         Ok(())
     }
@@ -59,7 +69,12 @@ impl VoiceProcessor {
         
         let registry_guard = self.registry.read().await;
         let registry = registry_guard.as_ref().unwrap();
-        let provider = select_stt_provider(registry, &self.config, None)?;
+        let (name, provider) = select_stt_provider_with_name(registry, &self.config, None)?;
+        
+        // Store the provider name
+        let mut name_guard = self.selected_stt_name.write().await;
+        *name_guard = Some(name);
+        
         *stt_guard = Some(provider.clone());
         Ok(provider)
     }
@@ -74,20 +89,34 @@ impl VoiceProcessor {
         
         let registry_guard = self.registry.read().await;
         let registry = registry_guard.as_ref().unwrap();
-        let provider = select_tts_provider(registry, &self.config, None)?;
+        let (name, provider) = select_tts_provider_with_name(registry, &self.config, None)?;
+        
+        // Store the provider name
+        let mut name_guard = self.selected_tts_name.write().await;
+        *name_guard = Some(name);
+        
         *tts_guard = Some(provider.clone());
         Ok(provider)
     }
     
     pub async fn set_stt_provider(&self, provider_name: &str) -> Result<()> {
+        println!("🎯 RUST: set_stt_provider('{}') called", provider_name);
         self.ensure_initialized().await?;
+        println!("🔍 RUST: Looking for STT provider '{}' in registry", provider_name);
         
         let registry_guard = self.registry.read().await;
         let registry = registry_guard.as_ref().unwrap();
         let provider = select_stt_provider(registry, &self.config, Some(provider_name))?;
+        println!("✅ RUST: Successfully selected STT provider '{}'", provider_name);
         
         let mut stt_guard = self.selected_stt.write().await;
         *stt_guard = Some(provider);
+        
+        // Store the provider name
+        let mut name_guard = self.selected_stt_name.write().await;
+        *name_guard = Some(provider_name.to_string());
+        
+        println!("✅ RUST: STT provider '{}' set successfully", provider_name);
         Ok(())
     }
     
@@ -100,6 +129,11 @@ impl VoiceProcessor {
         
         let mut tts_guard = self.selected_tts.write().await;
         *tts_guard = Some(provider);
+        
+        // Store the provider name
+        let mut name_guard = self.selected_tts_name.write().await;
+        *name_guard = Some(provider_name.to_string());
+        
         Ok(())
     }
     
@@ -184,6 +218,16 @@ impl VoiceProcessor {
         } else {
             Err(crate::DebabelizerError::Configuration(format!("TTS provider '{}' not found", provider_name)))
         }
+    }
+    
+    pub async fn get_stt_provider_name(&self) -> Option<String> {
+        let name_guard = self.selected_stt_name.read().await;
+        name_guard.clone()
+    }
+    
+    pub async fn get_tts_provider_name(&self) -> Option<String> {
+        let name_guard = self.selected_tts_name.read().await;
+        name_guard.clone()
     }
 }
 
@@ -358,6 +402,7 @@ mod tests {
             metadata: None,
             enable_word_time_offsets: true,
             enable_automatic_punctuation: false,
+            enable_language_identification: false,
         };
         
         // This will fail without API keys, but tests the interface

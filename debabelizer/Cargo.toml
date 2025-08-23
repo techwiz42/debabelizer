@@ -37,14 +37,20 @@ debabelizer-soniox = { path = "../providers/soniox", optional = true }
 debabelizer-elevenlabs = { path = "../providers/elevenlabs", optional = true }
 debabelizer-openai = { path = "../providers/openai", optional = true }
 debabelizer-deepgram = { path = "../providers/deepgram", optional = true }
+debabelizer-google = { path = "../providers/google", optional = true }
+debabelizer-azure = { path = "../providers/azure", optional = true }
+debabelizer-whisper = { path = "../providers/whisper", optional = true }
 
 [features]
-default = ["soniox", "elevenlabs", "openai", "deepgram"]
+default = ["soniox", "elevenlabs", "openai", "deepgram", "google", "azure", "whisper"]
 soniox = ["dep:debabelizer-soniox"]
 elevenlabs = ["dep:debabelizer-elevenlabs"]
 openai = ["dep:debabelizer-openai"]
 deepgram = ["dep:debabelizer-deepgram"]
-all-providers = ["soniox", "elevenlabs", "openai", "deepgram"]
+google = ["dep:debabelizer-google"]
+azure = ["dep:debabelizer-azure"]
+whisper = ["dep:debabelizer-whisper"]
+all-providers = ["soniox", "elevenlabs", "openai", "deepgram", "google", "azure", "whisper"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

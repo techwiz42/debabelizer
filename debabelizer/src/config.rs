@@ -200,6 +200,15 @@ fn add_provider_env_vars(mut config: config::ConfigBuilder<config::builder::Defa
     if let Ok(creds) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
         config = config.set_override("google.credentials_path", creds).expect("Failed to set google credentials");
     }
+    if let Ok(api_key) = env::var("GOOGLE_API_KEY") {
+        config = config.set_override("google.api_key", api_key).expect("Failed to set google api key");
+    }
+    if let Ok(project_id) = env::var("GOOGLE_PROJECT_ID") {
+        config = config.set_override("google.project_id", project_id).expect("Failed to set google project id");
+    } else if env::var("GOOGLE_API_KEY").is_ok() {
+        // If API key is set but no project ID, use a default
+        config = config.set_override("google.project_id", "default-project").expect("Failed to set google project id");
+    }
     
     // Azure
     if let Ok(api_key) = env::var("AZURE_SPEECH_KEY") {
@@ -207,6 +216,13 @@ fn add_provider_env_vars(mut config: config::ConfigBuilder<config::builder::Defa
     }
     if let Ok(region) = env::var("AZURE_SPEECH_REGION") {
         config = config.set_override("azure.region", region).expect("Failed to set azure region");
+    }
+    
+    // Whisper (local, no API key required)
+    // Set default configuration to enable it
+    config = config.set_override("whisper.model_size", "base").expect("Failed to set whisper model_size");
+    if let Ok(model) = env::var("WHISPER_MODEL_SIZE") {
+        config = config.set_override("whisper.model_size", model).expect("Failed to set whisper model_size");
     }
     
     config

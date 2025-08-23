@@ -23,7 +23,18 @@ futures = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
+tracing-subscriber = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 mockall = { workspace = true }
+tracing-subscriber = "0.3"
+
+[[example]]
+name = "test_streaming"
+required-features = []
+
+[[example]]
+name = "test_single_chunk"
+required-features = []
+

@@ -1,0 +1,15 @@
+[package]
+name = "test-rust-direct"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+# Empty workspace to prevent parent workspace inheritance
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+debabelizer = { path = "../debabelizer" }
+debabelizer-core = { path = "../debabelizer-core" }
+serde_json = "1.0"
+uuid = "1.0"
+chrono = "0.4"

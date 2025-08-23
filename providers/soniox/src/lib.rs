@@ -26,12 +26,25 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, MaybeTlsStream};
-use url::Url;
 use uuid::Uuid;
 
-const SONIOX_WS_URL: &str = "wss://api.soniox.com/transcribe-websocket";
+const SONIOX_WS_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
+
+#[derive(Debug)]
+enum WebSocketCommand {
+    SendAudio(Vec<u8>),
+    EndAudio,  // Signal no more audio is coming
+    Close,
+}
+
+#[derive(Debug)]
+enum WebSocketMessage {
+    Transcript(StreamingResult),
+    Error(String),
+    Closed,
+}
 
 #[derive(Debug)]
 pub struct SonioxProvider {
@@ -248,8 +261,9 @@ impl SttProvider for SonioxProvider {
 }
 
 struct SonioxStream {
-    websocket: Arc<Mutex<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
     session_id: Uuid,
+    command_tx: mpsc::UnboundedSender<WebSocketCommand>,
+    result_rx: Arc<Mutex<mpsc::UnboundedReceiver<WebSocketMessage>>>,
 }
 
 impl SonioxStream {
@@ -259,55 +273,41 @@ impl SonioxStream {
         auto_detect_language: bool,
         config: StreamConfig
     ) -> Result<Self> {
-        let url = Url::parse(SONIOX_WS_URL)
-            .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))?;
+        // Create channels for communication with background WebSocket handler
+        let (command_tx, command_rx) = mpsc::unbounded_channel::<WebSocketCommand>();
+        let (result_tx, result_rx) = mpsc::unbounded_channel::<WebSocketMessage>();
         
-        let (ws_stream, _) = connect_async(url.as_str())
+        // Connect to WebSocket
+        let (ws_stream, _) = connect_async(SONIOX_WS_URL)
             .await
             .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))?;
         
-        let websocket = Arc::new(Mutex::new(ws_stream));
-        
-        // Send initial configuration
-        let mut init_message = json!({
+        // Create initial configuration message
+        let init_message = json!({
             "api_key": api_key,
+            "audio_format": "pcm_s16le",
+            "sample_rate": config.format.sample_rate,
+            "num_channels": config.format.channels,
+            "model": model,
+            "enable_language_identification": auto_detect_language || config.language.is_none(),
             "include_nonfinal": config.interim_results,
-            "punctuate": config.punctuate,
-            "diarization": config.diarization,
         });
         
-        // Handle language configuration
-        if let Some(lang) = config.language {
-            // Explicit language requested
-            init_message["model"] = json!(lang);
-        } else if auto_detect_language {
-            // Auto-detect language
-            init_message["model"] = json!("auto");
-            init_message["detect_language"] = json!(true);
-        } else {
-            // Use default model
-            init_message["model"] = json!(model);
-        }
+        let session_id = config.session_id;
         
-        // Add any additional metadata from config
-        if let Some(metadata) = config.metadata {
-            if let Some(obj) = metadata.as_object() {
-                for (key, value) in obj {
-                    init_message[key] = value.clone();
-                }
-            }
-        }
-        
-        websocket
-            .lock()
-            .await
-            .send(Message::Text(init_message.to_string()))
-            .await
-            .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))?;
+        // Start background WebSocket handler task
+        let _handler_task = tokio::spawn(websocket_handler(
+            ws_stream,
+            init_message,
+            session_id,
+            command_rx,
+            result_tx,
+        ));
         
         Ok(Self {
-            websocket,
-            session_id: config.session_id,
+            session_id,
+            command_tx,
+            result_rx: Arc::new(Mutex::new(result_rx)),
         })
     }
 }
@@ -315,69 +315,30 @@ impl SonioxStream {
 #[async_trait]
 impl SttStream for SonioxStream {
     async fn send_audio(&mut self, chunk: &[u8]) -> Result<()> {
-        self.websocket
-            .lock()
-            .await
-            .send(Message::Binary(chunk.to_vec()))
-            .await
+        self.command_tx
+            .send(WebSocketCommand::SendAudio(chunk.to_vec()))
             .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))
     }
     
     async fn receive_transcript(&mut self) -> Result<Option<StreamingResult>> {
-        let mut ws = self.websocket.lock().await;
+        let message = {
+            let mut rx = self.result_rx.lock().await;
+            rx.recv().await
+        };
         
-        match ws.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let response: SonioxResponse = serde_json::from_str(&text)
-                    .map_err(|e| DebabelizerError::Serialization(e))?;
-                
-                if let Some(result) = response.result {
-                    let words = result.words.map(|words| {
-                        words
-                            .into_iter()
-                            .map(|w| WordTiming {
-                                word: w.text,
-                                start: w.start_time,
-                                end: w.start_time + w.duration,
-                                confidence: w.confidence.unwrap_or(1.0),
-                            })
-                            .collect()
-                    });
-                    
-                    // Build metadata including detected language
-                    let mut metadata = serde_json::Map::new();
-                    if let Some(lang) = result.language {
-                        metadata.insert("language".to_string(), json!(lang));
-                    }
-                    
-                    Ok(Some(StreamingResult {
-                        session_id: self.session_id,
-                        is_final: result.is_final,
-                        text: result.transcript,
-                        confidence: result.confidence.unwrap_or(1.0),
-                        timestamp: chrono::Utc::now(),
-                        words,
-                        metadata: if metadata.is_empty() { None } else { Some(json!(metadata)) },
-                    }))
-                } else {
-                    Ok(None)
-                }
+        match message {
+            Some(WebSocketMessage::Transcript(result)) => Ok(Some(result)),
+            Some(WebSocketMessage::Error(error)) => {
+                Err(DebabelizerError::Provider(ProviderError::Network(error)))
             }
-            Some(Ok(Message::Close(_))) => Ok(None),
-            Some(Err(e)) => Err(DebabelizerError::Provider(ProviderError::Network(
-                e.to_string(),
-            ))),
-            None => Ok(None),
-            _ => Ok(None),
+            Some(WebSocketMessage::Closed) => Ok(None),
+            None => Ok(None), // Channel closed
         }
     }
     
     async fn close(&mut self) -> Result<()> {
-        self.websocket
-            .lock()
-            .await
-            .close(None)
-            .await
+        self.command_tx
+            .send(WebSocketCommand::Close)
             .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))
     }
     
@@ -386,26 +347,228 @@ impl SttStream for SonioxStream {
     }
 }
 
+// Standalone WebSocket handler function (runs as background task)
+async fn websocket_handler(
+    mut ws_stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    init_message: serde_json::Value,
+    session_id: Uuid,
+    mut command_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    result_tx: mpsc::UnboundedSender<WebSocketMessage>
+) {
+    println!("🔧 RUST: Starting Soniox WebSocket background handler for session {}", session_id);
+    
+    // Send initial configuration
+    println!("📤 RUST: Sending initial configuration to Soniox...");
+    if let Err(e) = ws_stream.send(Message::Text(init_message.to_string())).await {
+        let _ = result_tx.send(WebSocketMessage::Error(format!("Failed to send config: {}", e)));
+        return;
+    }
+    println!("✅ RUST: Configuration sent successfully");
+    
+    // Wait for handshake response
+    match ws_stream.next().await {
+        Some(Ok(Message::Text(text))) => {
+            println!("📥 RUST: Received Soniox handshake: {}", text);
+            // Check for immediate errors in handshake
+            if text.contains("\"error_code\"") || text.contains("Missing API key") {
+                let _ = result_tx.send(WebSocketMessage::Error("Authentication failed".to_string()));
+                return;
+            }
+            println!("✅ RUST: Soniox handshake successful - entering main loop");
+        }
+        Some(Ok(msg)) => {
+            println!("🔍 RUST: Unexpected handshake message: {:?}", msg);
+        }
+        Some(Err(e)) => {
+            let _ = result_tx.send(WebSocketMessage::Error(format!("Handshake error: {}", e)));
+            return;
+        }
+        None => {
+            let _ = result_tx.send(WebSocketMessage::Error("Connection closed during handshake".to_string()));
+            return;
+        }
+    }
+    
+    // Main event loop using tokio::select!
+    loop {
+        println!("🔄 RUST: Main loop iteration starting - task processing commands/messages");
+        
+        tokio::select! {
+            // Handle commands from the stream interface
+            command = command_rx.recv() => {
+                match command {
+                    Some(WebSocketCommand::SendAudio(data)) => {
+                        println!("📤 RUST: Sending {} bytes of audio to Soniox via WebSocket", data.len());
+                        if let Err(e) = ws_stream.send(Message::Binary(data)).await {
+                            let _ = result_tx.send(WebSocketMessage::Error(format!("Failed to send audio: {}", e)));
+                            break;
+                        }
+                    }
+                    Some(WebSocketCommand::EndAudio) => {
+                        println!("🏁 RUST: Signaling end of audio to Soniox");
+                        // Send empty message to signal end of audio (like Python implementation)
+                        if let Err(e) = ws_stream.send(Message::Binary(vec![])).await {
+                            let _ = result_tx.send(WebSocketMessage::Error(format!("Failed to send end-of-audio: {}", e)));
+                            break;
+                        }
+                    }
+                    Some(WebSocketCommand::Close) => {
+                        println!("🛑 RUST: Closing WebSocket connection");
+                        let _ = ws_stream.close(None).await;
+                        let _ = result_tx.send(WebSocketMessage::Closed);
+                        break;
+                    }
+                    None => {
+                        println!("📪 RUST: Command channel closed");
+                        break;
+                    }
+                }
+            }
+            
+            // Handle incoming WebSocket messages
+            message = ws_stream.next() => {
+                match message {
+                    Some(Ok(Message::Text(text))) => {
+                        println!("📥 RUST: Received WebSocket text: {}", text);
+                        
+                        // Parse Soniox response
+                        match serde_json::from_str::<SonioxResponse>(&text) {
+                            Ok(response) => {
+                                // Check for errors
+                                if let Some(error) = response.error {
+                                    let _ = result_tx.send(WebSocketMessage::Error(error));
+                                    continue;
+                                }
+                                if let Some(error_msg) = response.error_message {
+                                    let _ = result_tx.send(WebSocketMessage::Error(error_msg));
+                                    continue;
+                                }
+                                
+                                // Process tokens
+                                if let Some(tokens) = response.tokens {
+                                    if tokens.is_empty() {
+                                        println!("💓 RUST: Keep-alive message (empty tokens)");
+                                        continue;
+                                    }
+                                    
+                                    // Build streaming result from tokens
+                                    let mut full_text = String::new();
+                                    let mut words = Vec::new();
+                                    let mut confidence_sum = 0.0;
+                                    let mut confidence_count = 0;
+                                    let mut is_final = false;
+                                    let mut detected_language = None;
+                                    
+                                    for token in tokens {
+                                        full_text.push_str(&token.text);
+                                        
+                                        if let Some(conf) = token.confidence {
+                                            confidence_sum += conf;
+                                            confidence_count += 1;
+                                        }
+                                        
+                                        if token.is_final {
+                                            is_final = true;
+                                        }
+                                        
+                                        // Extract language if available
+                                        if let Some(lang) = &token.language {
+                                            detected_language = Some(lang.clone());
+                                        }
+                                        
+                                        // Create word timing if available
+                                        if let (Some(start), Some(duration)) = (token.start_time, token.duration) {
+                                            words.push(WordTiming {
+                                                word: token.text.clone(),
+                                                start,
+                                                end: start + duration,
+                                                confidence: token.confidence.unwrap_or(1.0),
+                                            });
+                                        }
+                                    }
+                                    
+                                    let avg_confidence = if confidence_count > 0 {
+                                        confidence_sum / confidence_count as f32
+                                    } else {
+                                        1.0
+                                    };
+                                    
+                                    let result = StreamingResult {
+                                        session_id,
+                                        is_final,
+                                        text: full_text,
+                                        confidence: avg_confidence,
+                                        timestamp: chrono::Utc::now(),
+                                        words: if words.is_empty() { None } else { Some(words) },
+                                        metadata: detected_language.map(|lang| {
+                                            json!({"detected_language": lang})
+                                        }),
+                                    };
+                                    
+                                    println!("🎯 RUST: Sending transcript result: '{}' (final={})", result.text, result.is_final);
+                                    let _ = result_tx.send(WebSocketMessage::Transcript(result));
+                                }
+                            }
+                            Err(e) => {
+                                println!("❌ RUST: Failed to parse response: {}", e);
+                                let _ = result_tx.send(WebSocketMessage::Error(format!("Parse error: {}", e)));
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        println!("🏓 RUST: Received ping, sending pong");
+                        if let Err(e) = ws_stream.send(Message::Pong(data)).await {
+                            let _ = result_tx.send(WebSocketMessage::Error(format!("Pong failed: {}", e)));
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        println!("🏓 RUST: Received pong");
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        println!("🛑 RUST: WebSocket closed by server");
+                        let _ = result_tx.send(WebSocketMessage::Closed);
+                        break;
+                    }
+                    Some(Ok(msg)) => {
+                        println!("🔍 RUST: Other message type: {:?}", msg);
+                    }
+                    Some(Err(e)) => {
+                        println!("❌ RUST: WebSocket error: {}", e);
+                        let _ = result_tx.send(WebSocketMessage::Error(format!("WebSocket error: {}", e)));
+                        break;
+                    }
+                    None => {
+                        println!("📪 RUST: WebSocket stream ended");
+                        let _ = result_tx.send(WebSocketMessage::Closed);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("🏁 RUST: WebSocket handler exiting for session {}", session_id);
+}
+
 #[derive(Debug, Deserialize)]
 struct SonioxResponse {
-    result: Option<SonioxResult>,
+    tokens: Option<Vec<SonioxToken>>,
+    final_audio_proc_ms: Option<i32>,
+    total_audio_proc_ms: Option<i32>,
+    error: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SonioxResult {
-    transcript: String,
+struct SonioxToken {
+    text: String,
+    #[serde(default)]
     is_final: bool,
     confidence: Option<f32>,
-    words: Option<Vec<SonioxWord>>,
-    language: Option<String>,  // Language detected when using auto-detect
-}
-
-#[derive(Debug, Deserialize)]
-struct SonioxWord {
-    text: String,
-    start_time: f32,
-    duration: f32,
-    confidence: Option<f32>,
+    language: Option<String>,
+    start_time: Option<f32>,
+    duration: Option<f32>,
 }
 
 #[cfg(test)]
@@ -592,6 +755,7 @@ mod tests {
             metadata: None,
             enable_word_time_offsets: false,
             enable_automatic_punctuation: false,
+            enable_language_identification: false,
         };
         
         assert_eq!(config.language, Some("en-US".to_string()));
@@ -604,69 +768,70 @@ mod tests {
     #[test]
     fn test_soniox_response_parsing() {
         let json_response = r#"{
-            "result": {
-                "transcript": "Hello world",
-                "is_final": true,
-                "confidence": 0.95,
-                "language": "en",
-                "words": [
-                    {
-                        "text": "Hello",
-                        "start_time": 0.0,
-                        "duration": 0.5,
-                        "confidence": 0.98
-                    },
-                    {
-                        "text": "world",
-                        "start_time": 0.6,
-                        "duration": 0.4,
-                        "confidence": 0.92
-                    }
-                ]
-            }
+            "tokens": [
+                {
+                    "text": "Hello",
+                    "is_final": false,
+                    "confidence": 0.98,
+                    "start_time": 0.0,
+                    "duration": 0.5
+                },
+                {
+                    "text": "world",
+                    "is_final": true,
+                    "confidence": 0.92,
+                    "start_time": 0.6,
+                    "duration": 0.4
+                }
+            ],
+            "final_audio_proc_ms": 100,
+            "total_audio_proc_ms": 500
         }"#;
         
         let response: SonioxResponse = serde_json::from_str(json_response).unwrap();
-        let result = response.result.unwrap();
+        let tokens = response.tokens.unwrap();
         
-        assert_eq!(result.transcript, "Hello world");
-        assert!(result.is_final);
-        assert_eq!(result.confidence, Some(0.95));
-        assert_eq!(result.language, Some("en".to_string()));
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "Hello");
+        assert!(!tokens[0].is_final);
+        assert_eq!(tokens[0].confidence, Some(0.98));
+        assert_eq!(tokens[0].start_time, Some(0.0));
+        assert_eq!(tokens[0].duration, Some(0.5));
         
-        let words = result.words.unwrap();
-        assert_eq!(words.len(), 2);
-        assert_eq!(words[0].text, "Hello");
-        assert_eq!(words[0].start_time, 0.0);
-        assert_eq!(words[0].duration, 0.5);
-        assert_eq!(words[0].confidence, Some(0.98));
+        assert_eq!(tokens[1].text, "world");
+        assert!(tokens[1].is_final);
+        assert_eq!(tokens[1].confidence, Some(0.92));
     }
 
     #[test]
     fn test_soniox_response_minimal() {
         let json_response = r#"{
-            "result": {
-                "transcript": "Test",
-                "is_final": false
-            }
+            "tokens": [
+                {
+                    "text": "Test",
+                    "is_final": false
+                }
+            ]
         }"#;
         
         let response: SonioxResponse = serde_json::from_str(json_response).unwrap();
-        let result = response.result.unwrap();
+        let tokens = response.tokens.unwrap();
         
-        assert_eq!(result.transcript, "Test");
-        assert!(!result.is_final);
-        assert!(result.confidence.is_none());
-        assert!(result.language.is_none());
-        assert!(result.words.is_none());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "Test");
+        assert!(!tokens[0].is_final);
+        assert!(tokens[0].confidence.is_none());
+        assert!(tokens[0].language.is_none());
+        assert!(tokens[0].start_time.is_none());
     }
 
     #[test]
     fn test_soniox_response_empty() {
-        let json_response = r#"{}"#;
+        let json_response = r#"{"tokens":[]}"#;
         
         let response: SonioxResponse = serde_json::from_str(json_response).unwrap();
-        assert!(response.result.is_none());
+        let tokens = response.tokens.unwrap();
+        assert!(tokens.is_empty());
     }
 
     #[test]
@@ -677,25 +842,27 @@ mod tests {
             auto_detect_language: false,
         };
         
-        // Test URL construction logic
-        let base_url = "wss://api.soniox.com/transcribe-websocket";
+        // Test URL construction logic - updated to correct endpoint
+        let base_url = "wss://stt-rt.soniox.com/transcribe-websocket";
         assert_eq!(SONIOX_WS_URL, base_url);
     }
 
     #[test]
     fn test_word_timing_conversion() {
-        let soniox_word = SonioxWord {
+        let soniox_token = SonioxToken {
             text: "hello".to_string(),
-            start_time: 1.0,
-            duration: 0.5,
+            is_final: false,
             confidence: Some(0.95),
+            language: None,
+            start_time: Some(1.0),
+            duration: Some(0.5),
         };
         
         let word_timing = WordTiming {
-            word: soniox_word.text.clone(),
-            start: soniox_word.start_time,
-            end: soniox_word.start_time + soniox_word.duration,
-            confidence: soniox_word.confidence.unwrap_or(1.0),
+            word: soniox_token.text.clone(),
+            start: soniox_token.start_time.unwrap(),
+            end: soniox_token.start_time.unwrap() + soniox_token.duration.unwrap(),
+            confidence: soniox_token.confidence.unwrap_or(1.0),
         };
         
         assert_eq!(word_timing.word, "hello");
@@ -718,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_provider_constants() {
-        assert_eq!(SONIOX_WS_URL, "wss://api.soniox.com/transcribe-websocket");
+        assert_eq!(SONIOX_WS_URL, "wss://stt-rt.soniox.com/transcribe-websocket");
     }
 
     // Test streaming result creation

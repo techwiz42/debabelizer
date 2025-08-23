@@ -230,6 +230,7 @@ mod tests {
             metadata: None,
             enable_word_time_offsets: false,
             enable_automatic_punctuation: false,
+            enable_language_identification: false,
         };
         assert!(config.language.is_none());
         assert!(!config.interim_results);
@@ -247,6 +248,7 @@ mod tests {
             metadata: None,
             enable_word_time_offsets: true,
             enable_automatic_punctuation: true,
+            enable_language_identification: false,
         };
         assert_eq!(config.language, Some("".to_string()));
         assert_eq!(config.model, Some("".to_string()));

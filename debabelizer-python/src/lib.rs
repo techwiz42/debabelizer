@@ -1,13 +1,18 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyModule, PyAny};
 use pyo3::create_exception;
 use tokio::runtime::Runtime;
+use pyo3_asyncio::tokio::future_into_py;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::collections::HashMap;
 
 // Import the Rust debabelizer types
 use debabelizer_core::{
     AudioData, AudioFormat as CoreAudioFormat, TranscriptionResult as CoreTranscriptionResult,
     SynthesisResult as CoreSynthesisResult, Voice as CoreVoice, WordTiming as CoreWordTiming,
     StreamingResult as CoreStreamingResult, SynthesisOptions as CoreSynthesisOptions, 
+    SttStream,
 };
 use debabelizer::{DebabelizerConfig as CoreConfig, VoiceProcessor as CoreProcessor, DebabelizerError};
 
@@ -51,6 +56,38 @@ impl PyAudioFormat {
     #[getter]
     fn bit_depth(&self) -> u16 {
         self.inner.bit_depth.unwrap_or(16)
+    }
+}
+
+/// Python wrapper for AudioData
+#[pyclass(name = "AudioData")]
+#[derive(Clone)]
+pub struct PyAudioData {
+    pub inner: AudioData,
+}
+
+#[pymethods]
+impl PyAudioData {
+    #[new]
+    fn new(data: Vec<u8>, format: PyAudioFormat) -> Self {
+        Self {
+            inner: AudioData {
+                data,
+                format: format.inner,
+            },
+        }
+    }
+
+    #[getter]
+    fn data(&self) -> Vec<u8> {
+        self.inner.data.clone()
+    }
+
+    #[getter]
+    fn format(&self) -> PyAudioFormat {
+        PyAudioFormat {
+            inner: self.inner.format.clone(),
+        }
     }
 }
 
@@ -297,12 +334,20 @@ impl PyStreamingResult {
 
     #[getter]
     fn timestamp(&self) -> Option<String> {
-        None // Placeholder - would need to convert from Option<DateTime>
+        Some(self.inner.timestamp.to_rfc3339())
     }
 
     #[getter]
     fn processing_time_ms(&self) -> i32 {
-        0 // Placeholder
+        // Calculate processing time from metadata if available
+        if let Some(metadata) = &self.inner.metadata {
+            if let Some(time) = metadata.get("processing_time_ms") {
+                if let Some(time_val) = time.as_i64() {
+                    return time_val as i32;
+                }
+            }
+        }
+        0
     }
 }
 
@@ -310,6 +355,175 @@ create_exception!(debabelizer, ProviderError, pyo3::exceptions::PyException);
 create_exception!(debabelizer, AuthenticationError, ProviderError);
 create_exception!(debabelizer, RateLimitError, ProviderError);
 create_exception!(debabelizer, ConfigurationError, ProviderError);
+
+/// Manager for active streaming sessions
+struct StreamWrapper {
+    stream: Arc<Mutex<Box<dyn SttStream>>>,
+}
+
+struct StreamManager {
+    streams: Arc<Mutex<HashMap<uuid::Uuid, StreamWrapper>>>,
+}
+
+impl StreamManager {
+    fn new() -> Self {
+        Self {
+            streams: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    async fn add_stream(&self, session_id: uuid::Uuid, stream: Box<dyn SttStream>) {
+        let wrapper = StreamWrapper {
+            stream: Arc::new(Mutex::new(stream)),
+        };
+        self.streams.lock().await.insert(session_id, wrapper);
+    }
+    
+    async fn get_stream(&self, session_id: &uuid::Uuid) -> Option<Arc<Mutex<Box<dyn SttStream>>>> {
+        self.streams.lock().await.get(session_id).map(|w| w.stream.clone())
+    }
+    
+    async fn take_stream(&self, session_id: &uuid::Uuid) -> Option<Box<dyn SttStream>> {
+        self.streams.lock().await.remove(session_id).and_then(|w| {
+            // This is a hack to extract the stream from Arc<Mutex<Box<dyn SttStream>>>
+            // In production, we should use get_stream instead
+            match Arc::try_unwrap(w.stream) {
+                Ok(mutex) => Some(mutex.into_inner()),
+                Err(_) => None, // Arc is still in use elsewhere
+            }
+        })
+    }
+    
+    async fn remove_stream(&self, session_id: &uuid::Uuid) -> Option<Box<dyn SttStream>> {
+        self.take_stream(session_id).await
+    }
+}
+
+/// Python async iterator for streaming results
+#[pyclass]
+struct PyStreamingResultIterator {
+    session_id: uuid::Uuid,
+    timeout: Option<std::time::Duration>,
+    stream_manager: Arc<StreamManager>,
+}
+
+impl PyStreamingResultIterator {
+    fn new(session_id: uuid::Uuid, timeout: Option<std::time::Duration>, stream_manager: Arc<StreamManager>) -> Self {
+        Self {
+            session_id,
+            timeout,
+            stream_manager,
+        }
+    }
+}
+
+#[pymethods]
+impl PyStreamingResultIterator {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(slf: PyRef<'_, Self>, py: Python<'py>) -> PyResult<Option<&'py PyAny>> {
+        let stream_manager = slf.stream_manager.clone();
+        let session_id = slf.session_id;
+        let timeout = slf.timeout.unwrap_or(std::time::Duration::from_secs(1));
+        
+        // Use pyo3_asyncio with proper task spawning to prevent cancellation
+        let fut = pyo3_asyncio::tokio::future_into_py(py, async move {
+            // Use blocking approach to prevent task cancellation issues
+            let result = tokio::task::spawn_blocking(move || {
+                // Create a new runtime for this blocking operation
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+                rt.block_on(async move {
+                    // Try multiple times to get a result
+                    let mut attempts = 0;
+                    let max_attempts = 20; // 20 seconds max with 1s timeout each
+                    
+                    loop {
+                        attempts += 1;
+                        
+                        // Get the stream reference
+                        let stream_arc = match stream_manager.get_stream(&session_id).await {
+                            Some(s) => s,
+                            None => {
+                                if attempts < max_attempts {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    continue;
+                                } else {
+                                    return Err("Stream not found after retries".to_string());
+                                }
+                            }
+                        };
+                        
+                        // Lock the stream and receive transcript
+                        let mut stream = stream_arc.lock().await;
+                        
+                        // Try to receive with timeout
+                        match tokio::time::timeout(timeout, stream.receive_transcript()).await {
+                            Ok(Ok(Some(streaming_result))) => {
+                                return Ok(Some(streaming_result));
+                            }
+                            Ok(Ok(None)) => {
+                                // No result yet, but stream is still alive
+                                drop(stream);
+                                if attempts >= max_attempts {
+                                    return Ok(None); // Give up after max attempts
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                continue;
+                            }
+                            Ok(Err(e)) => {
+                                return Err(format!("Stream error: {}", e));
+                            }
+                            Err(_) => {
+                                // Timeout - continue trying
+                                drop(stream);
+                                if attempts >= max_attempts {
+                                    return Ok(None); // Give up after timeout
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                })
+            }).await;
+            
+            match result {
+                Ok(Ok(Some(streaming_result))) => {
+                    let py_result = PyStreamingResult {
+                        inner: streaming_result,
+                    };
+                    Ok(Python::with_gil(|py| py_result.into_py(py)))
+                }
+                Ok(Ok(None)) => {
+                    // Create a keep-alive result instead of ending iterator
+                    let keep_alive = PyStreamingResult {
+                        inner: debabelizer_core::stt::StreamingResult {
+                            session_id,
+                            is_final: false,
+                            text: String::new(),
+                            confidence: 0.0,
+                            timestamp: chrono::Utc::now(),
+                            words: None,
+                            metadata: Some(serde_json::json!({"type": "keep_alive", "source": "pyo3_timeout"})),
+                        },
+                    };
+                    Ok(Python::with_gil(|py| keep_alive.into_py(py)))
+                }
+                Ok(Err(e)) => {
+                    // Stream error - end the iterator
+                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(format!("Stream ended: {}", e)))
+                }
+                Err(join_error) => {
+                    // Blocking task failed
+                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(format!("Task join error: {}", join_error)))
+                }
+            }
+        })?;
+        
+        Ok(Some(fut))
+    }
+}
 
 /// Python wrapper for DebabelizerConfig
 #[pyclass(name = "DebabelizerConfig")]
@@ -320,10 +534,39 @@ pub struct PyDebabelizerConfig {
 #[pymethods]
 impl PyDebabelizerConfig {
     #[new]
-    #[pyo3(signature = (_config=None))]
-    fn new(_config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        // For now, just use default config - would need to parse the dict
-        let config = CoreConfig::default();
+    #[pyo3(signature = (config=None))]
+    fn new(config: Option<&PyDict>) -> PyResult<Self> {
+        let config = if let Some(config_dict) = config {
+            // Simple manual conversion for now - just parse the main structure
+            let mut providers = std::collections::HashMap::new();
+            
+            for (key, value) in config_dict.iter() {
+                let key_str = key.extract::<String>().unwrap_or_default();
+                if key_str == "preferences" {
+                    // Skip preferences for now
+                    continue;
+                }
+                
+                if let Ok(value_dict) = value.downcast::<PyDict>() {
+                    let mut provider_config = std::collections::HashMap::new();
+                    for (k, v) in value_dict.iter() {
+                        let k_str = k.extract::<String>().unwrap_or_default();
+                        let v_str = v.extract::<String>().unwrap_or_default();
+                        provider_config.insert(k_str, serde_json::Value::String(v_str));
+                    }
+                    providers.insert(key_str, debabelizer::config::ProviderConfig::Simple(provider_config));
+                }
+            }
+            
+            debabelizer::config::DebabelizerConfig {
+                preferences: debabelizer::config::Preferences::default(),
+                providers,
+            }
+        } else {
+            // Load config from environment by default, fall back to default if it fails
+            CoreConfig::new().unwrap_or_else(|_| CoreConfig::default())
+        };
+        
         Ok(Self { inner: config })
     }
 }
@@ -331,8 +574,9 @@ impl PyDebabelizerConfig {
 /// Python wrapper for VoiceProcessor
 #[pyclass(name = "VoiceProcessor")]
 pub struct PyVoiceProcessor {
-    processor: CoreProcessor,
+    processor: Arc<Mutex<CoreProcessor>>,
     runtime: Runtime,
+    stream_manager: Arc<StreamManager>,
 }
 
 #[pymethods]
@@ -350,10 +594,10 @@ impl PyVoiceProcessor {
 
         let cfg = config
             .map(|c| c.inner.clone())
-            .unwrap_or_else(|| CoreConfig::default());
+            .unwrap_or_else(|| CoreConfig::new().unwrap_or_else(|_| CoreConfig::default()));
 
         let processor = runtime.block_on(async {
-            let mut processor = CoreProcessor::with_config(cfg)?;
+            let processor = CoreProcessor::with_config(cfg)?;
             
             // Set STT provider if specified
             if let Some(stt_name) = &stt_provider {
@@ -370,7 +614,11 @@ impl PyVoiceProcessor {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create processor: {}", e))
         })?;
 
-        Ok(Self { processor, runtime })
+        Ok(Self { 
+            processor: Arc::new(Mutex::new(processor)), 
+            runtime,
+            stream_manager: Arc::new(StreamManager::new()),
+        })
     }
 
     /// Transcribe an audio file
@@ -422,9 +670,22 @@ impl PyVoiceProcessor {
         };
 
         let result = self.runtime.block_on(async {
-            self.processor.transcribe(audio).await
+            let processor = self.processor.lock().await;
+            processor.transcribe(audio).await
         }).map_err(|e| {
             ProviderError::new_err(format!("Transcription failed: {}", e))
+        })?;
+
+        Ok(PyTranscriptionResult { inner: result })
+    }
+
+    /// Transcribe audio data using AudioData object
+    fn transcribe(&mut self, audio: PyAudioData) -> PyResult<PyTranscriptionResult> {
+        let result = self.runtime.block_on(async {
+            let processor = self.processor.lock().await;
+            processor.transcribe(audio.inner).await
+        }).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
         })?;
 
         Ok(PyTranscriptionResult { inner: result })
@@ -476,7 +737,8 @@ impl PyVoiceProcessor {
         };
 
         let result = self.runtime.block_on(async {
-            self.processor.synthesize(&text, &options).await
+            let processor = self.processor.lock().await;
+            processor.synthesize(&text, &options).await
         }).map_err(|e| {
             ProviderError::new_err(format!("Synthesis failed: {}", e))
         })?;
@@ -525,7 +787,8 @@ impl PyVoiceProcessor {
         };
 
         let result = self.runtime.block_on(async {
-            self.processor.synthesize(&text, &options).await
+            let processor = self.processor.lock().await;
+            processor.synthesize(&text, &options).await
         }).map_err(|e| {
             ProviderError::new_err(format!("Synthesis failed: {}", e))
         })?;
@@ -544,7 +807,8 @@ impl PyVoiceProcessor {
     #[pyo3(signature = (language=None))]
     fn get_available_voices(&mut self, language: Option<String>) -> PyResult<Vec<PyVoice>> {
         let voices = self.runtime.block_on(async {
-            self.processor.list_voices().await
+            let processor = self.processor.lock().await;
+            processor.list_voices().await
         }).map_err(|e| {
             ProviderError::new_err(format!("Failed to get voices: {}", e))
         })?;
@@ -558,32 +822,38 @@ impl PyVoiceProcessor {
         Ok(filtered_voices)
     }
 
-    /// Start streaming transcription
-    #[pyo3(signature = (audio_format="wav".to_string(), sample_rate=16000, language=None, _language_hints=None, enable_language_identification=None, has_pending_audio=None))]
+    /// Start streaming transcription - creates real SttStream
+    #[pyo3(signature = (audio_format="wav".to_string(), sample_rate=16000, language=None, _language_hints=None, enable_language_identification=None, has_pending_audio=None, interim_results=None))]
     #[allow(unused_variables)]
-    fn start_streaming_transcription(
+    fn start_streaming_transcription<'py>(
         &mut self,
+        py: Python<'py>,
         audio_format: String,
         sample_rate: u32,
         language: Option<String>,
         _language_hints: Option<Vec<String>>,
         enable_language_identification: Option<bool>,
         has_pending_audio: Option<bool>,
-    ) -> PyResult<String> {
-        self.runtime.block_on(async {
-            // Create stream config
+        interim_results: Option<bool>,
+    ) -> PyResult<&'py PyAny> {
+        // Clone the Arcs to move into async block
+        let processor = self.processor.clone();
+        let stream_manager = self.stream_manager.clone();
+        
+        future_into_py(py, async move {
+            // Create stream config 
             let session_id = uuid::Uuid::new_v4();
             let stream_config = debabelizer_core::StreamConfig {
                 session_id,
                 language: language.clone(),
                 model: None,
+                interim_results: interim_results.unwrap_or(true),
                 format: debabelizer_core::AudioFormat {
                     format: audio_format.clone(),
                     sample_rate,
                     channels: 1,
                     bit_depth: Some(16),
                 },
-                interim_results: true,
                 punctuate: true,
                 profanity_filter: false,
                 diarization: false,
@@ -593,59 +863,97 @@ impl PyVoiceProcessor {
                 enable_language_identification: enable_language_identification.unwrap_or(false),
             };
 
-            // Create STT stream with the processor  
-            match self.processor.create_stt_stream(stream_config).await {
-                Ok(_stream) => {
-                    // The stream is created successfully, but we need to manage it.
-                    // For now, we'll let the session manager handle the stream lifecycle
-                    // and just return the session ID
-                    Ok(session_id.to_string())
+            // Actually create the SttStream using the processor
+            let processor = processor.lock().await;
+            match processor.transcribe_stream(stream_config).await {
+                Ok(stream) => {
+                    // Store the stream in the stream manager
+                    stream_manager.add_stream(session_id, stream).await;
+                    Ok(Python::with_gil(|py| session_id.to_string().to_object(py)))
                 },
-                Err(e) => Err(PyErr::new::<ProviderError, _>(format!("Failed to start streaming: {}", e))),
+                Err(e) => Err(PyErr::new::<ProviderError, _>(format!("Failed to create stream: {}", e))),
             }
         })
     }
 
-    /// Stream audio chunk
-    fn stream_audio(&mut self, session_id: String, _audio_chunk: Vec<u8>) -> PyResult<()> {
-        // For API compatibility, accept the parameters but implement streaming differently
-        // The actual streaming would be handled by the SttStream trait object
-        // For now, just validate the session ID and return success
-        let _session_uuid = uuid::Uuid::parse_str(&session_id)
+    /// Stream audio chunk - now async
+    fn stream_audio<'py>(
+        &mut self,
+        py: Python<'py>,
+        session_id: String,
+        audio_chunk: Vec<u8>,
+    ) -> PyResult<&'py PyAny> {
+        // Validate session ID
+        let session_uuid = uuid::Uuid::parse_str(&session_id)
             .map_err(|e| PyErr::new::<ProviderError, _>(format!("Invalid session ID: {}", e)))?;
         
-        // TODO: In a full implementation, we would route this to the appropriate SttStream
-        // For now, just return success to maintain API compatibility
-        Ok(())
+        let stream_manager = self.stream_manager.clone();
+        
+        // Return async function that processes audio
+        future_into_py(py, async move {
+            // Get the stream reference (doesn't remove it)
+            let stream_arc = match stream_manager.get_stream(&session_uuid).await {
+                Some(s) => s,
+                None => {
+                    return Err(PyErr::new::<ProviderError, _>(format!("No active stream for session {}", session_id)));
+                }
+            };
+            
+            // Lock the stream and send audio
+            let mut stream = stream_arc.lock().await;
+            match stream.send_audio(&audio_chunk).await {
+                Ok(_) => Ok(Python::with_gil(|py| py.None())),
+                Err(e) => Err(PyErr::new::<ProviderError, _>(format!("Failed to send audio: {}", e)))
+            }
+        })
     }
 
-    /// Stop streaming transcription
-    fn stop_streaming_transcription(&mut self, session_id: String) -> PyResult<()> {
-        // For API compatibility, accept the session ID but implement cleanup differently
-        let _session_uuid = uuid::Uuid::parse_str(&session_id)
+    /// Stop streaming transcription - now async
+    fn stop_streaming_transcription<'py>(
+        &mut self,
+        py: Python<'py>,
+        session_id: String,
+    ) -> PyResult<&'py PyAny> {
+        // Validate session ID
+        let session_uuid = uuid::Uuid::parse_str(&session_id)
             .map_err(|e| PyErr::new::<ProviderError, _>(format!("Invalid session ID: {}", e)))?;
         
-        // TODO: In a full implementation, we would close the SttStream for this session
-        // For now, just return success to maintain API compatibility
-        Ok(())
+        let stream_manager = self.stream_manager.clone();
+        
+        // Return async function that stops streaming
+        future_into_py(py, async move {
+            // Remove and close the stream using take_stream (which still removes it)
+            if let Some(mut stream) = stream_manager.take_stream(&session_uuid).await {
+                // Close the stream properly
+                match stream.close().await {
+                    Ok(_) => Ok(Python::with_gil(|py| py.None())),
+                    Err(e) => Err(PyErr::new::<ProviderError, _>(format!("Failed to close stream: {}", e)))
+                }
+            } else {
+                // Stream already removed or doesn't exist - not an error
+                Ok(Python::with_gil(|py| py.None()))
+            }
+        })
     }
 
-    /// Get streaming results
-    #[pyo3(signature = (session_id, timeout=None))]
+    /// Get streaming results - returns actual stream from processor
+    #[pyo3(signature = (session_id, timeout=None))]  
     fn get_streaming_results(
         &mut self,
+        py: Python<'_>,
         session_id: String,
         timeout: Option<f64>,
-    ) -> PyResult<Option<PyStreamingResult>> {
-        // For API compatibility, accept the parameters but implement differently
-        let _session_uuid = uuid::Uuid::parse_str(&session_id)
+    ) -> PyResult<PyObject> {
+        // Validate session ID
+        let session_uuid = uuid::Uuid::parse_str(&session_id)
             .map_err(|e| PyErr::new::<ProviderError, _>(format!("Invalid session ID: {}", e)))?;
         
-        let _timeout_duration = timeout.map(|t| std::time::Duration::from_secs_f64(t));
+        let stream_manager = self.stream_manager.clone();
+        let timeout_duration = timeout.map(|t| std::time::Duration::from_secs_f64(t));
         
-        // TODO: In a full implementation, we would read from the SttStream for this session
-        // For now, just return None to indicate no results available
-        Ok(None)
+        // Create async iterator that reads from the actual SttStream
+        let iter = PyStreamingResultIterator::new(session_uuid, timeout_duration, stream_manager);
+        Ok(iter.into_py(py))
     }
 
     /// Start streaming TTS
@@ -656,26 +964,30 @@ impl PyVoiceProcessor {
         _voice_id: Option<String>,
         _audio_format: Option<String>,
     ) -> PyResult<String> {
-        // Placeholder - would return session ID
-        Ok("tts-session-123".to_string())
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Streaming TTS not yet implemented in Rust version. Use synthesize() instead."
+        ))
     }
 
     /// Get streaming audio
     fn get_streaming_audio(&mut self, _session_id: String) -> PyResult<Vec<u8>> {
-        // Placeholder - would return audio chunk
-        Ok(vec![])
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Streaming TTS not yet implemented in Rust version. Use synthesize() instead."
+        ))
     }
 
     /// End streaming synthesis
     fn end_streaming_synthesis(&mut self, _session_id: String) -> PyResult<bool> {
-        // Placeholder
-        Ok(true)
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Streaming TTS not yet implemented in Rust version. Use synthesize() instead."
+        ))
     }
 
     /// Set STT provider
     fn set_stt_provider(&mut self, provider: String) -> PyResult<()> {
         self.runtime.block_on(async {
-            self.processor.set_stt_provider(&provider).await
+            let processor = self.processor.lock().await;
+            processor.set_stt_provider(&provider).await
         }).map_err(|e| {
             ProviderError::new_err(format!("Failed to set STT provider: {}", e))
         })?;
@@ -686,7 +998,8 @@ impl PyVoiceProcessor {
     /// Set TTS provider
     fn set_tts_provider(&mut self, provider: String) -> PyResult<()> {
         self.runtime.block_on(async {
-            self.processor.set_tts_provider(&provider).await
+            let processor = self.processor.lock().await;
+            processor.set_tts_provider(&provider).await
         }).map_err(|e| {
             ProviderError::new_err(format!("Failed to set TTS provider: {}", e))
         })?;
@@ -697,7 +1010,7 @@ impl PyVoiceProcessor {
     /// Get usage statistics
     fn get_usage_stats(&self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
-            let stats = PyDict::new_bound(py);
+            let stats = PyDict::new(py);
             stats.set_item("stt_requests", 0)?;
             stats.set_item("tts_requests", 0)?;
             stats.set_item("stt_duration", 0.0)?;
@@ -717,7 +1030,7 @@ impl PyVoiceProcessor {
     /// Test providers
     fn test_providers(&mut self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
-            let results = PyDict::new_bound(py);
+            let results = PyDict::new(py);
             // Placeholder - would call actual test methods on Rust processor
             Ok(results.into())
         })
@@ -726,15 +1039,19 @@ impl PyVoiceProcessor {
     /// Get STT provider name
     #[getter]
     fn stt_provider_name(&self) -> Option<String> {
-        // Would need to be implemented in Rust processor
-        None
+        self.runtime.block_on(async {
+            let processor = self.processor.lock().await;
+            processor.get_stt_provider_name().await
+        })
     }
 
     /// Get TTS provider name
     #[getter]
     fn tts_provider_name(&self) -> Option<String> {
-        // Would need to be implemented in Rust processor
-        None
+        self.runtime.block_on(async {
+            let processor = self.processor.lock().await;
+            processor.get_tts_provider_name().await
+        })
     }
 
     /// Cleanup resources
@@ -750,7 +1067,7 @@ impl PyVoiceProcessor {
 fn create_processor(
     stt_provider: &str,
     tts_provider: &str,
-    config: Option<&Bound<'_, PyDict>>,
+    config: Option<&PyDict>,
 ) -> PyResult<PyVoiceProcessor> {
     let py_config = if let Some(_cfg) = config {
         Some(PyDebabelizerConfig::new(Some(_cfg))?)
@@ -767,8 +1084,9 @@ fn create_processor(
 
 /// Python module definition
 #[pymodule]
-fn _internal(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _internal(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyAudioFormat>()?;
+    m.add_class::<PyAudioData>()?;
     m.add_class::<PyWordTiming>()?;
     m.add_class::<PyTranscriptionResult>()?;
     m.add_class::<PyVoice>()?;
@@ -777,10 +1095,10 @@ fn _internal(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDebabelizerConfig>()?;
     m.add_class::<PyVoiceProcessor>()?;
     
-    m.add("ProviderError", py.get_type_bound::<ProviderError>())?;
-    m.add("AuthenticationError", py.get_type_bound::<AuthenticationError>())?;
-    m.add("RateLimitError", py.get_type_bound::<RateLimitError>())?;
-    m.add("ConfigurationError", py.get_type_bound::<ConfigurationError>())?;
+    m.add("ProviderError", py.get_type::<ProviderError>())?;
+    m.add("AuthenticationError", py.get_type::<AuthenticationError>())?;
+    m.add("RateLimitError", py.get_type::<RateLimitError>())?;
+    m.add("ConfigurationError", py.get_type::<ConfigurationError>())?;
     
     m.add_function(wrap_pyfunction!(create_processor, m)?)?;
     

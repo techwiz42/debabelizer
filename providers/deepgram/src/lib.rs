@@ -1001,6 +1001,7 @@ mod tests {
             metadata: None,
             enable_word_time_offsets: true,
             enable_automatic_punctuation: true,
+            enable_language_identification: false,
         };
         
         // Validate language normalization works with config

@@ -1,0 +1,15 @@
+[package]
+name = "test_soniox_direct"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_soniox_direct"
+path = "test_soniox_direct.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+serde_json = "1.0"
+futures = "0.3"
+url = "2.5"

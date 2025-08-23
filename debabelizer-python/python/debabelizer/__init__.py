@@ -6,6 +6,7 @@ Breaking down language barriers, one voice at a time.
 
 from ._internal import (
     AudioFormat,
+    AudioData,
     WordTiming,
     TranscriptionResult,
     Voice,
@@ -25,7 +26,7 @@ STTProvider = None  # Base class - not directly exposed in Rust bindings
 TTSProvider = None  # Base class - not directly exposed in Rust bindings
 
 # Version
-__version__ = "0.1.7"
+__version__ = "0.1.45"
 
 # Main exports - matching the original exactly
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "StreamingResult",
     "Voice",
     "AudioFormat",
+    "AudioData",
     "ProviderError",
     # "WordTiming",  # Not exposed in legacy API at module level
     "AuthenticationError",
