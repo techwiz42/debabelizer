@@ -428,75 +428,43 @@ impl PyStreamingResultIterator {
         let session_id = slf.session_id;
         let timeout = slf.timeout.unwrap_or(std::time::Duration::from_secs(1));
         
-        // Use pyo3_asyncio with proper task spawning to prevent cancellation
+        // Use direct async approach without spawn_blocking
         let fut = pyo3_asyncio::tokio::future_into_py(py, async move {
-            // Use blocking approach to prevent task cancellation issues
-            let result = tokio::task::spawn_blocking(move || {
-                // Create a new runtime for this blocking operation
-                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async move {
-                    // Try multiple times to get a result
-                    let mut attempts = 0;
-                    let max_attempts = 20; // 20 seconds max with 1s timeout each
-                    
-                    loop {
-                        attempts += 1;
-                        
-                        // Get the stream reference
-                        let stream_arc = match stream_manager.get_stream(&session_id).await {
-                            Some(s) => s,
-                            None => {
-                                if attempts < max_attempts {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                    continue;
-                                } else {
-                                    return Err("Stream not found after retries".to_string());
-                                }
-                            }
-                        };
-                        
-                        // Lock the stream and receive transcript
-                        let mut stream = stream_arc.lock().await;
-                        
-                        // Try to receive with timeout
-                        match tokio::time::timeout(timeout, stream.receive_transcript()).await {
-                            Ok(Ok(Some(streaming_result))) => {
-                                return Ok(Some(streaming_result));
-                            }
-                            Ok(Ok(None)) => {
-                                // No result yet, but stream is still alive
-                                drop(stream);
-                                if attempts >= max_attempts {
-                                    return Ok(None); // Give up after max attempts
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                continue;
-                            }
-                            Ok(Err(e)) => {
-                                return Err(format!("Stream error: {}", e));
-                            }
-                            Err(_) => {
-                                // Timeout - continue trying
-                                drop(stream);
-                                if attempts >= max_attempts {
-                                    return Ok(None); // Give up after timeout
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                })
-            }).await;
+            // Direct async implementation - no nested runtime
             
-            match result {
+            // Get the stream reference 
+            let stream_arc = match stream_manager.get_stream(&session_id).await {
+                Some(s) => s,
+                None => {
+                    // Stream not found - end iterator
+                    return Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>("Stream not found"));
+                }
+            };
+            
+            // Lock the stream and receive transcript with timeout
+            let mut stream = stream_arc.lock().await;
+            
+            // Try to receive with timeout
+            match tokio::time::timeout(timeout, stream.receive_transcript()).await {
                 Ok(Ok(Some(streaming_result))) => {
+                    // Got a real result
+                    println!("📝 PYTHON WRAPPER: Received streaming result - text='{}', is_final={}, confidence={}", 
+                        streaming_result.text, streaming_result.is_final, streaming_result.confidence);
                     let py_result = PyStreamingResult {
                         inner: streaming_result,
                     };
                     Ok(Python::with_gil(|py| py_result.into_py(py)))
                 }
                 Ok(Ok(None)) => {
-                    // Create a keep-alive result instead of ending iterator
+                    // Stream ended normally
+                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>("Stream ended"))
+                }
+                Ok(Err(e)) => {
+                    // Stream error - end iterator
+                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(format!("Stream error: {}", e)))
+                }
+                Err(_timeout) => {
+                    // Timeout - return empty result to keep iterator alive
                     let keep_alive = PyStreamingResult {
                         inner: debabelizer_core::stt::StreamingResult {
                             session_id,
@@ -509,14 +477,6 @@ impl PyStreamingResultIterator {
                         },
                     };
                     Ok(Python::with_gil(|py| keep_alive.into_py(py)))
-                }
-                Ok(Err(e)) => {
-                    // Stream error - end the iterator
-                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(format!("Stream ended: {}", e)))
-                }
-                Err(join_error) => {
-                    // Blocking task failed
-                    Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(format!("Task join error: {}", join_error)))
                 }
             }
         })?;
@@ -705,16 +665,18 @@ impl PyVoiceProcessor {
     }
 
     /// Synthesize speech from text
-    #[pyo3(signature = (text, voice=None, audio_format=None, sample_rate=None))]
+    #[pyo3(signature = (text, voice=None, language=None, audio_format=None, sample_rate=None))]
     fn synthesize(
         &mut self,
         text: String,
         voice: Option<PyRef<PyVoice>>,
+        language: Option<String>,
         audio_format: Option<PyRef<PyAudioFormat>>,
         sample_rate: Option<u32>,
     ) -> PyResult<PySynthesisResult> {
         let voice_data = voice.map(|v| v.inner.clone()).unwrap_or_else(|| {
-            CoreVoice::new("default".to_string(), "Default Voice".to_string(), "en".to_string())
+            let lang = language.clone().unwrap_or_else(|| "en".to_string());
+            CoreVoice::new("default".to_string(), "Default Voice".to_string(), lang)
         });
 
         let format = audio_format.map(|f| f.inner.clone()).unwrap_or_else(|| {
@@ -843,6 +805,8 @@ impl PyVoiceProcessor {
         future_into_py(py, async move {
             // Create stream config 
             let session_id = uuid::Uuid::new_v4();
+            println!("🚀 PYTHON WRAPPER: start_streaming_transcription called - session_id={}, format={}, sample_rate={}", 
+                session_id, audio_format, sample_rate);
             let stream_config = debabelizer_core::StreamConfig {
                 session_id,
                 language: language.clone(),
@@ -865,8 +829,10 @@ impl PyVoiceProcessor {
 
             // Actually create the SttStream using the processor
             let processor = processor.lock().await;
+            println!("🔒 PYTHON WRAPPER: Got processor lock, creating stream...");
             match processor.transcribe_stream(stream_config).await {
                 Ok(stream) => {
+                    println!("✅ PYTHON WRAPPER: Stream created successfully for session {}", session_id);
                     // Store the stream in the stream manager
                     stream_manager.add_stream(session_id, stream).await;
                     Ok(Python::with_gil(|py| session_id.to_string().to_object(py)))
@@ -891,6 +857,8 @@ impl PyVoiceProcessor {
         
         // Return async function that processes audio
         future_into_py(py, async move {
+            println!("🎤 PYTHON WRAPPER: stream_audio called for session {} with {} bytes", session_id, audio_chunk.len());
+            
             // Get the stream reference (doesn't remove it)
             let stream_arc = match stream_manager.get_stream(&session_uuid).await {
                 Some(s) => s,
@@ -902,8 +870,14 @@ impl PyVoiceProcessor {
             // Lock the stream and send audio
             let mut stream = stream_arc.lock().await;
             match stream.send_audio(&audio_chunk).await {
-                Ok(_) => Ok(Python::with_gil(|py| py.None())),
-                Err(e) => Err(PyErr::new::<ProviderError, _>(format!("Failed to send audio: {}", e)))
+                Ok(_) => {
+                    println!("✅ PYTHON WRAPPER: Successfully sent {} bytes to stream", audio_chunk.len());
+                    Ok(Python::with_gil(|py| py.None()))
+                },
+                Err(e) => {
+                    println!("❌ PYTHON WRAPPER: Failed to send audio: {}", e);
+                    Err(PyErr::new::<ProviderError, _>(format!("Failed to send audio: {}", e)))
+                }
             }
         })
     }
@@ -1056,8 +1030,46 @@ impl PyVoiceProcessor {
 
     /// Cleanup resources
     fn cleanup(&mut self) -> PyResult<()> {
-        // Cleanup would be handled automatically when the processor is dropped
+        println!("🧹 PYTHON WRAPPER: Cleaning up VoiceProcessor resources");
+        
+        // Force cleanup all active streams
+        self.runtime.block_on(async {
+            let stream_map = self.stream_manager.streams.lock().await;
+            let session_ids: Vec<uuid::Uuid> = stream_map.keys().cloned().collect();
+            drop(stream_map);
+            
+            for session_id in session_ids {
+                if let Some(mut stream) = self.stream_manager.take_stream(&session_id).await {
+                    println!("🛑 PYTHON WRAPPER: Force closing stream {}", session_id);
+                    let _ = stream.close().await;
+                }
+            }
+        });
+        
+        println!("✅ PYTHON WRAPPER: VoiceProcessor cleanup complete");
         Ok(())
+    }
+}
+
+impl Drop for PyVoiceProcessor {
+    fn drop(&mut self) {
+        println!("🧹 PYTHON WRAPPER: PyVoiceProcessor dropping - ensuring all streams are cleaned up");
+        
+        // Force cleanup all active streams on drop to prevent orphaned processes
+        self.runtime.block_on(async {
+            let stream_map = self.stream_manager.streams.lock().await;
+            let session_ids: Vec<uuid::Uuid> = stream_map.keys().cloned().collect();
+            drop(stream_map);
+            
+            for session_id in session_ids {
+                if let Some(mut stream) = self.stream_manager.take_stream(&session_id).await {
+                    println!("🚨 PYTHON WRAPPER: Emergency cleanup - closing stream {}", session_id);
+                    let _ = stream.close().await;
+                }
+            }
+        });
+        
+        println!("✅ PYTHON WRAPPER: PyVoiceProcessor drop cleanup complete");
     }
 }
 

@@ -4,14 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "debabelizer"
-description = "Universal voice processing library with support for multiple STT/TTS providers"
+description = "DEPRECATED - This package is no longer maintained. Neither the Python nor Rust implementations are production-ready."
 requires-python = ">=3.8"
 authors = [
     { name = "Debabelizer Contributors", email = "contributors@debabelizer.com" },
 ]
 keywords = ["speech", "text-to-speech", "speech-to-text", "voice", "audio"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 7 - Inactive",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",

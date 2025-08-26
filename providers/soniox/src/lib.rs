@@ -37,6 +37,7 @@ enum WebSocketCommand {
     SendAudio(Vec<u8>),
     EndAudio,  // Signal no more audio is coming
     Close,
+    Shutdown,  // Force shutdown the background task
 }
 
 #[derive(Debug)]
@@ -62,7 +63,7 @@ impl SonioxProvider {
         let model = config
             .get_value("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("en")
+            .unwrap_or("stt-rt-preview-v2")
             .to_string();
         
         let auto_detect_language = config
@@ -264,6 +265,7 @@ struct SonioxStream {
     session_id: Uuid,
     command_tx: mpsc::UnboundedSender<WebSocketCommand>,
     result_rx: Arc<Mutex<mpsc::UnboundedReceiver<WebSocketMessage>>>,
+    _task_handle: tokio::task::JoinHandle<()>,  // Store task handle for proper cleanup
 }
 
 impl SonioxStream {
@@ -277,8 +279,9 @@ impl SonioxStream {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<WebSocketCommand>();
         let (result_tx, result_rx) = mpsc::unbounded_channel::<WebSocketMessage>();
         
-        // Connect to WebSocket
-        let (ws_stream, _) = connect_async(SONIOX_WS_URL)
+        // Connect to WebSocket with API key in URL
+        let url = format!("{}?api_key={}", SONIOX_WS_URL, api_key);
+        let (ws_stream, _) = connect_async(&url)
             .await
             .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))?;
         
@@ -296,7 +299,7 @@ impl SonioxStream {
         let session_id = config.session_id;
         
         // Start background WebSocket handler task
-        let _handler_task = tokio::spawn(websocket_handler(
+        let handler_task = tokio::spawn(websocket_handler(
             ws_stream,
             init_message,
             session_id,
@@ -308,6 +311,7 @@ impl SonioxStream {
             session_id,
             command_tx,
             result_rx: Arc::new(Mutex::new(result_rx)),
+            _task_handle: handler_task,
         })
     }
 }
@@ -315,35 +319,78 @@ impl SonioxStream {
 #[async_trait]
 impl SttStream for SonioxStream {
     async fn send_audio(&mut self, chunk: &[u8]) -> Result<()> {
+        println!("🎵 SONIOX: send_audio called with {} bytes", chunk.len());
+        
+        // If chunk is empty, send EndAudio command instead
+        let command = if chunk.is_empty() {
+            println!("🏁 SONIOX: Empty chunk detected, sending EndAudio signal");
+            WebSocketCommand::EndAudio
+        } else {
+            WebSocketCommand::SendAudio(chunk.to_vec())
+        };
+        
         self.command_tx
-            .send(WebSocketCommand::SendAudio(chunk.to_vec()))
-            .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))
+            .send(command)
+            .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))?;
+        println!("✅ SONIOX: Audio command sent to WebSocket handler");
+        Ok(())
     }
     
     async fn receive_transcript(&mut self) -> Result<Option<StreamingResult>> {
+        println!("🔍 SONIOX: receive_transcript called, waiting for result...");
         let message = {
             let mut rx = self.result_rx.lock().await;
             rx.recv().await
         };
         
         match message {
-            Some(WebSocketMessage::Transcript(result)) => Ok(Some(result)),
+            Some(WebSocketMessage::Transcript(result)) => {
+                println!("📝 SONIOX: Received transcript result - text='{}', is_final={}", result.text, result.is_final);
+                Ok(Some(result))
+            },
             Some(WebSocketMessage::Error(error)) => {
+                println!("❌ SONIOX: Received error: {}", error);
                 Err(DebabelizerError::Provider(ProviderError::Network(error)))
             }
-            Some(WebSocketMessage::Closed) => Ok(None),
-            None => Ok(None), // Channel closed
+            Some(WebSocketMessage::Closed) => {
+                println!("🛑 SONIOX: Stream closed");
+                Ok(None)
+            },
+            None => {
+                println!("📪 SONIOX: Channel closed");
+                Ok(None) // Channel closed
+            }
         }
     }
     
     async fn close(&mut self) -> Result<()> {
-        self.command_tx
-            .send(WebSocketCommand::Close)
-            .map_err(|e| DebabelizerError::Provider(ProviderError::Network(e.to_string())))
+        println!("🛑 SONIOX: Closing stream for session {}", self.session_id);
+        
+        // Send shutdown command to background task
+        let _ = self.command_tx.send(WebSocketCommand::Shutdown);
+        
+        // The task handle will be dropped automatically when SonioxStream is dropped,
+        // which will force the background task to terminate
+        println!("✅ SONIOX: Stream close complete for session {}", self.session_id);
+        Ok(())
     }
     
     fn session_id(&self) -> Uuid {
         self.session_id
+    }
+}
+
+impl Drop for SonioxStream {
+    fn drop(&mut self) {
+        println!("🧹 RUST: SonioxStream dropping - aborting background task for session {}", self.session_id);
+        
+        // Send shutdown command if channel is still open
+        let _ = self.command_tx.send(WebSocketCommand::Shutdown);
+        
+        // Abort the background task to prevent orphaned processes
+        self._task_handle.abort();
+        
+        println!("✅ RUST: Background task aborted for session {}", self.session_id);
     }
 }
 
@@ -390,10 +437,26 @@ async fn websocket_handler(
     }
     
     // Main event loop using tokio::select!
+    let mut messages_received = 0;
     loop {
         println!("🔄 RUST: Main loop iteration starting - task processing commands/messages");
         
         tokio::select! {
+            // Add a timeout branch to see if we're stuck waiting
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {
+                println!("⏰ RUST: No activity for 10 seconds, messages received so far: {}", messages_received);
+                // Send a keep-alive result to prevent iterator timeout
+                let result = StreamingResult {
+                    session_id,
+                    is_final: false,
+                    text: String::new(),
+                    confidence: 0.0,
+                    timestamp: chrono::Utc::now(),
+                    words: None,
+                    metadata: Some(json!({"type": "timeout_keepalive"})),
+                };
+                let _ = result_tx.send(WebSocketMessage::Transcript(result));
+            }
             // Handle commands from the stream interface
             command = command_rx.recv() => {
                 match command {
@@ -411,9 +474,16 @@ async fn websocket_handler(
                             let _ = result_tx.send(WebSocketMessage::Error(format!("Failed to send end-of-audio: {}", e)));
                             break;
                         }
+                        println!("✅ RUST: End-of-audio signal sent successfully");
                     }
                     Some(WebSocketCommand::Close) => {
                         println!("🛑 RUST: Closing WebSocket connection");
+                        let _ = ws_stream.close(None).await;
+                        let _ = result_tx.send(WebSocketMessage::Closed);
+                        break;
+                    }
+                    Some(WebSocketCommand::Shutdown) => {
+                        println!("🚨 RUST: Shutdown command received - force terminating WebSocket handler");
                         let _ = ws_stream.close(None).await;
                         let _ = result_tx.send(WebSocketMessage::Closed);
                         break;
@@ -429,7 +499,41 @@ async fn websocket_handler(
             message = ws_stream.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        println!("📥 RUST: Received WebSocket text: {}", text);
+                        messages_received += 1;
+                        println!("📥 RUST: Received WebSocket text #{}: {}", messages_received, text);
+                        
+                        // Write all messages to log for debugging
+                        use std::fs::OpenOptions;
+                        use std::io::Write;
+                        if let Ok(mut file) = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open("/tmp/soniox_messages.log")
+                        {
+                            writeln!(file, "Message #{}: {}", messages_received, text).ok();
+                        }
+                        
+                        // Check if this is just a keep-alive or processing update
+                        if text.contains("\"tokens\":[]") && !text.contains("\"error\"") {
+                            // Parse to check processing time
+                            if let Ok(resp) = serde_json::from_str::<SonioxResponse>(&text) {
+                                if let Some(proc_ms) = resp.total_audio_proc_ms {
+                                    println!("💓 RUST: Processing update - total_audio_proc_ms: {}ms", proc_ms);
+                                }
+                            }
+                            // Don't continue - send this as an empty result to keep the iterator alive
+                            let result = StreamingResult {
+                                session_id,
+                                is_final: false,
+                                text: String::new(),
+                                confidence: 0.0,
+                                timestamp: chrono::Utc::now(),
+                                words: None,
+                                metadata: Some(json!({"type": "processing_update"})),
+                            };
+                            let _ = result_tx.send(WebSocketMessage::Transcript(result));
+                            continue;
+                        }
                         
                         // Parse Soniox response
                         match serde_json::from_str::<SonioxResponse>(&text) {
@@ -506,6 +610,20 @@ async fn websocket_handler(
                                     };
                                     
                                     println!("🎯 RUST: Sending transcript result: '{}' (final={})", result.text, result.is_final);
+                                    
+                                    // Also write to a log file for debugging
+                                    if !result.text.is_empty() {
+                                        use std::fs::OpenOptions;
+                                        use std::io::Write;
+                                        if let Ok(mut file) = OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open("/tmp/soniox_transcription.log")
+                                        {
+                                            writeln!(file, "Transcription: '{}'", result.text).ok();
+                                        }
+                                    }
+                                    
                                     let _ = result_tx.send(WebSocketMessage::Transcript(result));
                                 }
                             }

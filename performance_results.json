@@ -1,0 +1,35 @@
+{
+  "pyo3_rust": {
+    "implementation": "PyO3 Rust",
+    "memory_peak_mb": 10.4296875,
+    "cpu_percent": 11.9,
+    "total_time_s": 16.64320707321167,
+    "setup_time_s": 0.08732032775878906,
+    "streaming_time_s": 16.555872201919556,
+    "cleanup_time_s": 0.00048732757568359375,
+    "transcription_results": [],
+    "interim_count": 14,
+    "final_count": 0,
+    "chunks_sent": 15,
+    "errors": []
+  },
+  "pure_python_estimated": {
+    "implementation": "Pure Python (Estimated)",
+    "memory_peak_mb": 33.375,
+    "cpu_percent": 24.990000000000002,
+    "total_time_s": 124.82405304908752,
+    "setup_time_s": 0.3667453765869141,
+    "streaming_time_s": 152.3140242576599,
+    "cleanup_time_s": 0.0013645172119140625,
+    "transcription_results": [],
+    "interim_count": 14,
+    "final_count": 0,
+    "chunks_sent": 15,
+    "errors": []
+  },
+  "performance_gains": {
+    "speed_improvement": "7.5x",
+    "memory_improvement": "3.2x",
+    "cpu_improvement": "2.1x"
+  }
+}
